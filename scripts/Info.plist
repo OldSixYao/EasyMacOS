@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+    <key>CFBundleName</key><string>EasyMacOS</string>
+    <key>CFBundleDisplayName</key><string>EasyMacOS</string>
+    <key>CFBundleIdentifier</key><string>app.pasteman.PasteMan</string>
+    <key>CFBundleExecutable</key><string>EasyMacOS</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>1.0.6</string>
+    <key>CFBundleVersion</key><string>7</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>LSMinimumSystemVersion</key><string>15.0</string>
+    <key>LSUIElement</key><true/>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleLocalizations</key><array><string>en</string><string>zh-Hans</string></array>
+    <key>NSPasteboardUsageDescription</key><string>EasyMacOS saves copied text and images locally so you can find and paste them again.</string>
+</dict></plist>

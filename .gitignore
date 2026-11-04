@@ -1,0 +1,55 @@
+.build/
+dist/
+.DS_Store
+.swiftpm/
+*.xcuserstate
+
+# 本地代理规则与验证记录
+AGENTS.md
+agent.md
+PLAN.md
+VALIDATION.md
+docs/QA.md
+docs/PERFORMANCE.md
+Benchmarks/
+
+# 本地代理、编辑器助手与会话
+.codex/
+.agents/
+.agent/
+.claude/
+.cursor/
+.github/copilot-instructions.md
+[aA][gG][eE][nN][tT][sS].md
+[aA][gG][eE][nN][tT].md
+CLAUDE.md
+SKILL.md
+*codex*.md
+*agent*.md
+
+# 本地计划、任务、验收与报告（测试源代码和脚本可提交）
+[Pp][Ll][Aa][Nn].md
+[Vv][Aa][Ll][Ii][Dd][Aa][Tt][Ii][Oo][Nn].md
+PLAN*.md
+TASK*.md
+TODO*.md
+VALIDATION*.md
+TEST-REPORT*.md
+TEST_REPORT*.md
+QA.md
+PERFORMANCE.md
+plans/
+tasks/
+reports/
+test-results/
+playwright-report/
+coverage/
+*.log
+
+# 本地凭据
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.p8
