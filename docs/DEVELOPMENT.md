@@ -62,12 +62,39 @@ Screen capture has a separate working-memory guard (100 million pixels across ca
 
 Window snapping, scrolling screenshots, cross-display selections, OCR, recording video, editing flattened pins, and persistent pin recovery are not included.
 
+## 鼠标滚动增强
+
+在设置的“鼠标”页开启增强，首次安装或升级默认关闭，之后恢复已保存的选择。平滑滚动默认开启、反向默认关闭、速度为一倍、平滑时长为一百八十毫秒；速度可调半倍至三倍，平滑时长可调八十至四百毫秒。反向只翻转鼠标事件，不改系统方向；关闭平滑仍可使用速度与反向。恢复默认会同时关闭增强并清空鼠标排除名单，不改变剪贴板排除名单。
+
+默认只处理离散滚轮。远程桌面可能将实体鼠标滚轮转换为连续像素事件，导致增强开启后仍无效果；可在鼠标页开启“远程滚轮兼容”，同时处理不带手势或惯性阶段的连续事件。兼容选项默认关闭，独立保存在 `remoteCompatibility`，旧偏好缺少字段时保留全部原有选择。
+
+兼容模式仍放行带手势或惯性阶段的触控板事件，不按鼠标型号或输入来源进程猜测设备。某些设备或驱动若同样上报无手势连续事件，也会受到兼容模式影响，切回本机精确滚动或使用其他滚动增强工具时可关闭该选项。命令键或控制键组合滚动、本应用窗口及排除名单中的应用始终直接放行；按事件实际接收进程匹配名单，不以前台应用猜测接收方。未知应用标识不接管。
+
+鼠标页显示真实的启动与权限状态。首次开启不会后台弹出授权框；点击“开启辅助功能”复用现有授权入口。授权后返回应用会重试，也可在权限页刷新；启动失败可手动重试。无需单独申请输入监控权限。锁屏、休眠、会话离开时取消动画并释放接管，恢复后按保存配置启动；关闭增强立即交还原生滚动。
+
+滚动计算与系统事件边界分离，事件接管和按需动画在专用串行运行循环中执行，动画空闲时不启动计时。设置保存在应用偏好中的 `mouseScrollConfiguration`，不迁移或复用剪贴板排除名单。应用不记录滚动轨迹或输入内容，不附带第三方进程，也不修改参考仓库。
+
+```sh
+# 合成事件、可控时间与模拟权限，不安装全局接管或向其他应用发送事件
+./scripts/test.sh --filter MouseScroll
+# 可选真实接管验证，仅向临时合成窗口发事件；需已有权限并先退出其他滚动增强工具
+EASYMACOS_MOUSE_LIVE=1 ./scripts/test.sh --filter MouseScrollDeliveryTests
+# 界面离屏渲染，包含六个标签及鼠标页的深浅外观
+PASTEMAN_RENDER_TESTS=1 ./scripts/test.sh --filter RenderingTests
+# 对已打开的设置窗口检查六标签切换，结束后恢复原标签
+swift scripts/settings-smoke.swift
+# 核对安装后总开关与实际接管状态，结束时恢复原开关和标签
+swift scripts/mouse-smoke.swift
+```
+
+真实鼠标与触控板需分别验收浏览器和访达中的滚动、换向、排除、关闭增强、锁屏恢复及钉图缩放。其他全局滚动工具应先关闭，避免叠加修改同一事件。
+
 ## Permissions
 
 Three independent permissions are used:
 
 1. **Clipboard access:** On macOS 15.4+, allow EasyMacOS in System Settings → Privacy & Security → Paste from Other Apps, choosing **Always Allow**. Use the app's permission button to initiate the first user-requested read. Background monitoring waits while access is Ask/Denied and does not repeatedly prompt. If the deep link is unavailable on a macOS release, navigate to that settings page manually. macOS 15.0–15.3 use the existing pasteboard access behavior.
-2. **Accessibility:** Optional, for sending ⌘V to the previous app. EasyMacOS checks the system keyboard-event-posting permission and the foreground application immediately before sending events to that process. It cooperatively yields activation to the recipient and waits for stable focus and released modifier keys. If permission or the destination is unavailable, the selected item remains on the clipboard and the app asks you to paste manually. The app cannot verify whether the receiving application actually inserted the content or supports image paste.
+2. **Accessibility:** Optional, for sending ⌘V to the previous app. EasyMacOS checks the system keyboard-event-posting permission and the foreground application immediately before sending events to that process. It cooperatively yields activation to the recipient and waits for stable focus and released modifier keys. If permission or the destination is unavailable, the selected item remains on the clipboard and the app asks you to paste manually. The app cannot verify whether the receiving application actually inserted the content or supports image paste. 鼠标增强同样使用辅助功能权限，只有用户开启增强后才接管滚轮事件；运行状态以实际创建并启用事件接管成功为准。
 
 3. **Screen Recording:** Optional, used only after explicitly starting a screenshot. Allow EasyMacOS in System Settings → Privacy & Security → Screen & System Audio Recording (wording varies by macOS version). The first permission request ends that screenshot attempt; invoke the shortcut again after granting access. If macOS requests a restart, quit and reopen EasyMacOS. Settings shows the current permission status and an authorization button. No screen recording permission is requested on launch, during history recording, or by the automated tests.
 
@@ -126,7 +153,7 @@ export VERSION='1.0.0'
 ## Architecture
 
 - `FinderMenuCore`：菜单动作、配置文件、结构化操作链接、路径格式化、目录选择与不覆盖创建逻辑。操作链接只接受固定动作和绝对本地路径，终端通过系统文件夹终端服务启动，使用独立剪贴板传参，不拼接执行脚本。
-- `PasteMan`：唯一的宿主应用，提供剪贴板历史、截图、钉图、三合一设置页，以及访达操作请求队列。
+- `PasteMan`：唯一的宿主应用，提供剪贴板历史、截图、钉图、鼠标滚动增强、统一设置页，以及访达操作请求队列。
 - `FinderExtension`：内嵌访达扩展，在每次右键时读取配置并生成四项轻量菜单；复制动作直接完成，新建和终端动作通过固定 `easymacos://finder` 请求交给宿主应用。扩展只读取所选项目元数据，不遍历目录、不读取文件内容、不维护文件索引。
 - `PasteManCore`: actor-isolated SQLite repository, content hashing, bounded ImageIO processing, capture count gate, and privacy rules. SQL binds clipboard strings as parameters; identifiers and files use generated UUIDs. Read queries check cancellation between rows and inside SQLite's VM, so obsolete searches release the repository promptly. Retention and admission share one compact metadata snapshot per save; no-op cleanup avoids a write transaction.
 - `PasteMan` (app target): observable model, injectable clipboard/permission/paste services, independent Carbon global hotkeys, ScreenCaptureKit still capture, Core Graphics/Core Text annotation rendering, AppKit status item/floating panel/window lifecycle, SwiftUI history/settings/onboarding. Source filters are refreshed on history changes, rather than every search. Long text uses a selectable, read-only AppKit text view with noncontiguous layout. Image conversion and display decoding run off the main actor. Display previews are downsampled to the view size and screen scale; one actor serializes display decoding. Canceled queued requests are skipped, in-flight synchronous results are discarded if canceled, and autoreleased decoder objects are drained after each operation. Original saved images and pasted image quality are unchanged. Closing the history panel cancels its queries and image tasks and releases its views; decoded thumbnails have a separate 8 MiB LRU cache, purged on memory pressure or clear and invalidated on deletion. Full-size previews are not cached.

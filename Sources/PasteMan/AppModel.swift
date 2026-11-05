@@ -7,6 +7,7 @@ import PasteManCore
     let settings: AppSettings
     let permissions: PermissionService
     let hotKeys: HotKeyService
+    let mouseScroll: MouseScrollService
     @ObservationIgnored let finderModel: FinderModel
     private(set) var entries: [HistoryEntry] = []
     private(set) var sources: [SourceApplication] = []
@@ -43,6 +44,11 @@ import PasteManCore
         self.settings = settings
         self.permissions = permissions
         self.hotKeys = hotKeys
+        let mouseScroll = MouseScrollService(configuration: settings.mouse)
+        self.mouseScroll = mouseScroll
+        settings.onMouseChanged = { [weak settings, weak mouseScroll] in
+            if let settings { mouseScroll?.apply(settings.mouse) }
+        }
         self.finderModel = FinderModel()
         self.pasteExecutor = pasteExecutor
         self.clipboardWriter = clipboardWriter

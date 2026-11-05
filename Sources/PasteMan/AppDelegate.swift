@@ -39,6 +39,8 @@ import SwiftUI
     private var outsideMonitor: Any?
     private var lastExternalApp: NSRunningApplication?
     private var workspaceObserver: NSObjectProtocol?
+    private var sessionObservers: [NSObjectProtocol] = []
+    private var lockObservers: [NSObjectProtocol] = []
     private var menuOpen = false
     private let finderRequests = FinderRequestQueue()
 
@@ -68,10 +70,32 @@ import SwiftUI
             let keys = HotKeyService()
             let state = AppModel(repository: repository, settings: settings, permissions: permissions, hotKeys: keys)
             model = state
+            let mouseScroll = state.mouseScroll
             hotKeys = keys
             let watcher = ClipboardMonitor(
                 clipboard: SystemClipboard(), repository: repository, settings: settings, permissions: permissions)
             monitor = watcher
+            for (name, reason) in [(NSWorkspace.willSleepNotification, "sleep"), (NSWorkspace.sessionDidResignActiveNotification, "session"), (NSWorkspace.screensDidSleepNotification, "display")] {
+                sessionObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak mouseScroll] _ in
+                    MainActor.assumeIsolated {
+                        mouseScroll?.setSessionActive(false, reason: reason)
+                    }
+                })
+            }
+            for (name, reason) in [(NSWorkspace.didWakeNotification, "sleep"), (NSWorkspace.sessionDidBecomeActiveNotification, "session"), (NSWorkspace.screensDidWakeNotification, "display")] {
+                sessionObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak mouseScroll] _ in
+                    MainActor.assumeIsolated {
+                        mouseScroll?.setSessionActive(true, reason: reason)
+                    }
+                })
+            }
+            for (name, active) in [("com.apple.screenIsLocked", false), ("com.apple.screenIsUnlocked", true)] {
+                lockObservers.append(DistributedNotificationCenter.default().addObserver(forName: Notification.Name(name), object: nil, queue: .main) { [weak mouseScroll] _ in
+                    MainActor.assumeIsolated {
+                        mouseScroll?.setSessionActive(active, reason: "lock")
+                    }
+                })
+            }
             settings.onRecordingChanged = { [weak watcher] in watcher?.recordingStateChanged() }
             watcher.onChange = { [weak state] in state?.changed() }
             watcher.onError = { [weak state] in state?.recordingIssue = L.error($0) }
@@ -129,6 +153,7 @@ import SwiftUI
             setupStatusItem()
             trackExternalApps()
             watcher.start()
+            mouseScroll.start()
             Task {
                 do { try await repository.prune(policy: settings.policy, now: Date()) } catch {
                     state.message = L.error(error)
@@ -410,7 +435,7 @@ import SwiftUI
             window.title = L.t("EasyMacOS Settings", "EasyMacOS 设置")
             window.delegate = self
             window.contentView = NSHostingView(rootView: SettingsView(model: model, initialTab: initialTab ?? .general))
-            window.setContentSize(NSSize(width: 550, height: 610))
+            window.setContentSize(NSSize(width: 600, height: 580))
             window.isReleasedWhenClosed = false
             window.center()
             settingsWindow = window
@@ -452,9 +477,12 @@ import SwiftUI
         screenshots?.cancel()
         screenshots?.pins.closeAll()
         monitor?.stop()
+        model?.mouseScroll.stop()
         hotKeys?.stop()
         if let outsideMonitor { NSEvent.removeMonitor(outsideMonitor) }
         if let workspaceObserver { NSWorkspace.shared.notificationCenter.removeObserver(workspaceObserver) }
+        for observer in sessionObservers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
+        for observer in lockObservers { DistributedNotificationCenter.default().removeObserver(observer) }
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }

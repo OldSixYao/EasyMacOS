@@ -4,13 +4,15 @@ import ServiceManagement
 import SwiftUI
 
 enum SettingsTab: Int, CaseIterable {
-    case general, finder, privacy, permissions
+    case general, screenshot, clipboard, finder, mouse, permissions
 
     var title: String {
         switch self {
         case .general: L.t("General", "通用")
-        case .finder: L.t("Finder", "访达")
-        case .privacy: L.t("Privacy", "隐私")
+        case .screenshot: L.t("Screenshots", "截图")
+        case .clipboard: L.t("Clipboard", "剪贴板")
+        case .finder: L.t("Context Menu", "右键菜单")
+        case .mouse: L.t("Mouse", "鼠标")
         case .permissions: L.t("Permissions", "权限")
         }
     }
@@ -18,8 +20,10 @@ enum SettingsTab: Int, CaseIterable {
     var symbol: String {
         switch self {
         case .general: "gearshape"
+        case .screenshot: "viewfinder"
+        case .clipboard: "doc.on.clipboard"
         case .finder: "cursorarrow.click.2"
-        case .privacy: "hand.raised"
+        case .mouse: "computermouse"
         case .permissions: "checkmark.shield"
         }
     }
@@ -27,12 +31,12 @@ enum SettingsTab: Int, CaseIterable {
 
 struct SettingsView: View {
     @Bindable var model: AppModel
-    @ViewState private var recording = false
-    @ViewState private var recordingScreenshot = false
+    @ViewState private var recording: HotKeyAction?
     @ViewState private var shortcutError: String?
     @ViewState private var newBundleID = ""
     @ViewState private var error: String?
     @ViewState private var selectedTab: SettingsTab
+    @FocusState private var focusedTab: SettingsTab?
 
     init(model: AppModel, initialTab: SettingsTab = .general) {
         self.model = model
@@ -40,304 +44,304 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        @Bindable var settings = model.settings
         VStack(spacing: 0) {
-            Picker(L.t("Settings section", "设置分类"), selection: $selectedTab) {
+            HStack(spacing: 8) {
                 ForEach(SettingsTab.allCases, id: \.self) { tab in
-                    Label(tab.title, systemImage: tab.symbol).tag(tab)
+                    Button {
+                        selectedTab = tab
+                        focusedTab = tab
+                    } label: {
+                        VStack(spacing: 6) {
+                            Image(systemName: tab.symbol).font(.system(size: 20)).frame(height: 24)
+                            Text(tab.title).font(.system(size: 12, weight: .medium))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 60)
+                        .foregroundStyle(selectedTab == tab ? Color.accentColor : .secondary)
+                        .background(selectedTab == tab ? Color.accentColor.opacity(0.10) : .clear,
+                                    in: RoundedRectangle(cornerRadius: 10))
+                        .contentShape(RoundedRectangle(cornerRadius: 10))
+                    }
+                    .buttonStyle(.plain)
+                    .focused($focusedTab, equals: tab)
+                    .accessibilityAddTraits(selectedTab == tab ? [.isSelected] : [])
+                    .accessibilityRemoveTraits(selectedTab == tab ? [] : [.isSelected])
+                    .accessibilityLabel(tab.title)
                 }
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .textSelection(.disabled)
-            .frame(width: 430)
-            .padding(.vertical, 16)
+            .onMoveCommand { direction in
+                let offset: Int
+                switch direction {
+                case .left: offset = -1
+                case .right: offset = 1
+                default: return
+                }
+                let tabs = SettingsTab.allCases
+                let index = (selectedTab.rawValue + offset + tabs.count) % tabs.count
+                focusedTab = tabs[index]
+                selectedTab = tabs[index]
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 12)
             Divider()
             Group {
-                if selectedTab == .general {
-                    Form {
-                        Section {
-                            HStack {
-                                Text(L.t("Clipboard history shortcut", "剪贴板历史快捷键"))
-                                Spacer()
-                                Button(
-                                    recording
-                                        ? L.t("Press shortcut… Esc to cancel", "按下快捷键… Esc 取消")
-                                        : settings.shortcut.label
-                                ) {
-                                    recordingScreenshot = false
-                                    recording = true
-                                    shortcutError = nil
-                                    model.hotKeys.record { shortcut in
-                                        recording = false
-                                        recordingScreenshot = false
-                                        if let shortcut, !model.applyShortcut(shortcut) {
-                                            shortcutError = model.message
-                                        }
-                                    }
-                                }.font(.system(.body, design: .monospaced))
-                            }
-                            if let shortcutError { Text(shortcutError).font(.caption).foregroundStyle(.orange) }
-                            Button(L.t("Restore history shortcut", "恢复历史默认快捷键")) {
-                                if !model.applyShortcut(.default) { shortcutError = model.message }
-                            }
-                            HStack {
-                                Text(L.t("Screenshot shortcut", "截图快捷键"))
-                                Spacer()
-                                Button(
-                                    recordingScreenshot
-                                        ? L.t("Press shortcut… Esc to cancel", "按下快捷键… Esc 取消")
-                                        : settings.screenshotShortcut.label
-                                ) {
-                                    recording = false
-                                    recordingScreenshot = true
-                                    shortcutError = nil
-                                    model.hotKeys.record { shortcut in
-                                        recordingScreenshot = false
-                                        if let shortcut, !model.applyShortcut(shortcut, for: .screenshot) {
-                                            shortcutError = model.message
-                                        }
-                                    }
-                                }.font(.system(.body, design: .monospaced))
-                            }
-                            Button(L.t("Restore screenshot shortcut", "恢复截图默认快捷键")) {
-                                if !model.applyShortcut(.screenshot, for: .screenshot) { shortcutError = model.message }
-                            }
-                            Toggle(
-                                L.t("Launch at login", "开机启动"),
-                                isOn: Binding(
-                                    get: { model.permissions.loginStatus == .enabled },
-                                    set: { enabled in
-                                        do { try model.permissions.setLoginEnabled(enabled) } catch {
-                                            self.error = L.t(
-                                                "Could not update login item. Run the signed app from Applications and check System Settings.",
-                                                "无法修改开机启动项，请将已签名的应用放入「应用程序」，并检查系统设置。")
-                                        }
-                                    }))
-                            if model.permissions.loginStatus == .requiresApproval {
-                                Button(L.t("Approve in Login Items…", "在登录项中允许…")) {
-                                    SMAppService.openSystemSettingsLoginItems()
-                                }
-                            }
-                        } header: {
-                            Text(L.t("General", "通用"))
-                        }
-                        Section {
-                            Picker(L.t("Keep ordinary history", "普通历史保留时间"), selection: $settings.retentionDays) {
-                                ForEach([1, 7, 14, 30, 90, 365], id: \.self) {
-                                    Text("\($0) " + L.t("days", "天")).tag($0)
-                                }
-                            }
-                            Picker(L.t("Ordinary history limit", "普通历史条数上限"), selection: $settings.historyLimit) {
-                                ForEach([100, 250, 500, 1000, 2000], id: \.self) { Text("\($0)").tag($0) }
-                            }
-                            LabeledContent(L.t("Content storage budget", "内容存储预算"), value: "512 MiB")
-                            Text(
-                                L.t(
-                                    "Favorites remain until you delete them. When storage is full, ordinary items are removed first. If favorites fill the budget, new copies are skipped.",
-                                    "收藏会一直保留，直到手动删除。空间不足时优先清理普通记录；收藏占满预算时，暂停保存新内容。")
-                            )
-                            .font(.caption).foregroundStyle(.secondary)
-                            Button(L.t("Clear history…", "清空历史…")) { model.onClear?() }
-                        } header: {
-                            Text(L.t("History", "历史记录"))
-                        }
-                        Section {
-                            Text("EasyMacOS").font(.headline)
-                            LabeledContent(L.t("Version", "版本"), value: AppVersion.current.display)
-                            Text(
-                                L.t(
-                                    "Clipboard, screenshots and Finder tools.\nStored locally. No cloud sync or analytics.",
-                                    "剪贴板、截图与访达工具，三合一。\n仅在本机保存，无云同步与使用追踪。")
-                            )
-                            .font(.caption).foregroundStyle(.secondary)
-                        }
-                    }.formStyle(.grouped)
-                } else if selectedTab == .finder {
-                    FinderSettingsView(model: model.finderModel)
-                } else if selectedTab == .privacy {
-                    Form {
-                        Section {
-                            Label(
-                                L.t("Your clipboard stays on this Mac", "剪贴板内容仅保存在这台 Mac"), systemImage: "lock.shield")
-                            Text(
-                                L.t(
-                                    "Marked sensitive or transient content is ignored. App exclusions use the foreground app at detection time. Copies not yet detected are discarded when switching apps to avoid assigning them to the wrong source. This cannot identify every password. Pause recording before copying unmarked secrets. Local history is not additionally encrypted.",
-                                    "自动忽略带敏感或临时标记的内容。应用排除根据检测时的前台应用判断；切换应用时丢弃尚未检测的内容，避免来源误判。仍无法识别所有密码，复制未标记的敏感内容前请暂停记录。本地历史未额外加密。")
-                            )
-                            .font(.caption).foregroundStyle(.secondary)
-                        }
-                        Section {
-                            ScrollView {
-                                VStack(spacing: 6) {
-                                    ForEach(settings.excludedApps.sorted(), id: \.self) { bundle in
-                                        HStack {
-                                            Text(bundle).font(.system(size: 11, design: .monospaced)).textSelection(
-                                                .enabled)
-                                            Spacer()
-                                            Button {
-                                                settings.excludedApps.remove(bundle)
-                                            } label: {
-                                                Image(systemName: "minus.circle")
-                                            }
-                                            .buttonStyle(.plain).accessibilityLabel(
-                                                L.t("Remove exclusion", "移除排除项") + " " + bundle)
-                                        }
-                                    }
-                                }
-                            }.frame(height: 170)
-                            HStack {
-                                TextField(L.t("Application bundle ID", "应用 Bundle ID"), text: $newBundleID)
-                                Button(L.t("Add", "添加")) { addBundleID() }.disabled(
-                                    newBundleID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                            }
-                            HStack {
-                                Button(L.t("Choose application…", "选择应用…")) { chooseApplication() }
-                                Button(L.t("Restore defaults", "恢复默认名单")) {
-                                    settings.excludedApps = PrivacyPolicy.defaultExcludedApps
-                                }
-                            }
-                        } header: {
-                            Text(L.t("Excluded applications", "不记录这些应用"))
-                        }
-                    }.formStyle(.grouped)
-                } else {
-                    Form {
-                        Section {
-                            PermissionStatusRow(
-                                title: L.t("Clipboard recording", "剪贴板记录"),
-                                status: clipboardLabel, granted: model.permissions.allowsMonitoring)
-                            Text(
-                                model.permissions.allowsMonitoring
-                                    ? L.t(
-                                        "Clipboard access is enabled. Copied text and images are saved locally; you can pause recording from the menu bar.",
-                                        "已允许访问剪贴板。复制的文本和图片会保存在本机，可随时从菜单栏暂停记录。")
-                                    : L.t(
-                                        "On recent macOS versions, choose Always Allow for EasyMacOS in System Settings → Privacy & Security → Paste from Other Apps. Background recording waits until access is allowed.",
-                                        "在新版 macOS 的「系统设置 → 隐私与安全性 → 从其他应用粘贴」中，为 EasyMacOS 选择「始终允许」。允许访问后才会在后台记录。")
-                            )
-                            .font(.caption).foregroundStyle(.secondary)
-                            if !model.permissions.allowsMonitoring {
-                                Button(L.t("Allow clipboard access…", "允许访问剪贴板…")) {
-                                    model.permissions.requestClipboardAccess()
-                                }
-                            }
-                        }
-                        Section {
-                            PermissionStatusRow(
-                                title: L.t("Automatic paste", "自动粘贴"),
-                                status: model.permissions.accessibility
-                                    ? L.t("Enabled", "已启用") : L.t("Permission needed", "需要授权"),
-                                granted: model.permissions.accessibility)
-                            Text(
-                                model.permissions.accessibility
-                                    ? L.t(
-                                        "Accessibility access is enabled. Select a history item to paste into the previous application. New Finder files can also enter inline rename.",
-                                        "已允许辅助功能访问。选择历史记录后可粘贴到之前使用的应用；访达新建文件后也可自动进入原地重命名。")
-                                    : L.t(
-                                        "Accessibility access allows automatic paste and inline rename after creating Finder files. Without it, copying and file creation remain available.",
-                                        "辅助功能权限用于自动粘贴，以及访达新建后的原地重命名。未授权时，仍可复制历史内容和新建文件。")
-                            )
-                            .font(.caption).foregroundStyle(.secondary)
-                            if !model.permissions.accessibility {
-                                Button(L.t("Allow Accessibility…", "允许辅助功能…")) {
-                                    model.permissions.requestAccessibility()
-                                }
-                                Text(
-                                    L.t(
-                                        "Already enabled in System Settings? First quit and reopen EasyMacOS. When migrating from an ad-hoc build or changing signing certificates, remove the old entry and add the currently running app below. Rebuilds using the same fixed certificate and app identity keep the signing identity stable.",
-                                        "系统开关已开启但这里仍未授权？请先退出并重新打开。首次从临时签名迁移或更换证书时，需要移除旧条目并添加下方定位的当前应用。使用相同固定证书和应用标识重新构建时，签名身份保持稳定。"
-                                    )
-                                )
-                                .font(.caption).foregroundStyle(.secondary)
-                                Button(L.t("Show current EasyMacOS in Finder", "在 Finder 中定位当前 EasyMacOS")) {
-                                    model.permissions.revealRunningApplication()
-                                }
-                            }
-                        }
-                        Section {
-                            PermissionStatusRow(
-                                title: L.t("Screenshots", "屏幕截图"),
-                                status: model.permissions.screenRecording
-                                    ? L.t("Enabled", "已启用") : L.t("Permission needed", "需要授权"),
-                                granted: model.permissions.screenRecording)
-                            Text(
-                                L.t(
-                                    "Screen Recording access is used only when you take a screenshot. Screenshots and pinned images stay on this Mac.",
-                                    "仅在主动截图时捕获屏幕。截图及钉图均留在本机。")
-                            )
-                            .font(.caption).foregroundStyle(.secondary)
-                            if !model.permissions.screenRecording {
-                                Button(L.t("Allow Screen Recording…", "允许屏幕录制…")) {
-                                    model.permissions.requestScreenRecording()
-                                }
-                                Text(
-                                    L.t(
-                                        "If macOS requests it, quit and reopen EasyMacOS after granting access.",
-                                        "若 macOS 提示需要，请在授权后退出并重新打开 EasyMacOS。")
-                                )
-                                .font(.caption).foregroundStyle(.secondary)
-                            }
-                        }
-                        Button(L.t("Refresh permission status", "刷新权限状态")) { model.permissions.refresh() }
-                    }.formStyle(.grouped)
+                switch selectedTab {
+                case .general: generalSettings
+                case .screenshot: screenshotSettings
+                case .clipboard: clipboardSettings
+                case .finder: FinderSettingsView(model: model.finderModel)
+                case .mouse: MouseSettingsView(settings: model.settings, service: model.mouseScroll, permissions: model.permissions)
+                case .permissions: permissionSettings
                 }
-            }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(width: 550, height: 610)
+        .frame(width: 600, height: 580)
         .background(Color(nsColor: .windowBackgroundColor))
-        .onChange(of: settings.retentionDays) { model.applyRetention() }
-        .onChange(of: settings.historyLimit) { model.applyRetention() }
+        .onChange(of: model.settings.retentionDays) { model.applyRetention() }
+        .onChange(of: model.settings.historyLimit) { model.applyRetention() }
+        .onChange(of: focusedTab) { previous, current in
+            guard let current else { return }
+            if previous == nil {
+                // 初次进入标签栏时，焦点跟随当前页面，保留指定标签打开的行为。
+                focusedTab = selectedTab
+            } else {
+                selectedTab = current
+            }
+        }
         .onChange(of: selectedTab) {
-            model.hotKeys.cancelRecording()
-            recording = false
-            recordingScreenshot = false
-            model.permissions.refresh()
+            if focusedTab != nil { focusedTab = selectedTab }
+            cancelRecording()
+            shortcutError = nil
+            refreshPermissions()
         }
-        .onDisappear {
-            model.hotKeys.cancelRecording()
-            recording = false
-            recordingScreenshot = false
-        }
-        .onAppear { model.permissions.refresh() }
+        .onDisappear { cancelRecording() }
+        .onAppear { refreshPermissions() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            model.permissions.refresh()
+            refreshPermissions()
         }
-        .alert(
-            L.t("EasyMacOS", "EasyMacOS"), isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })
+        .alert(L.t("EasyMacOS", "EasyMacOS"), isPresented: Binding(
+            get: { error != nil }, set: { if !$0 { error = nil } })
         ) {
             Button(L.t("OK", "好")) { error = nil }
         } message: {
             Text(error ?? "")
         }
     }
+
+    private var generalSettings: some View {
+        Form {
+            Section {
+                Toggle(L.t("Launch at login", "开机启动"), isOn: Binding(
+                    get: { model.permissions.loginStatus == .enabled },
+                    set: { enabled in
+                        do { try model.permissions.setLoginEnabled(enabled) }
+                        catch { self.error = L.t("Could not update login item.", "无法修改开机启动项。") }
+                    }))
+                if model.permissions.loginStatus == .requiresApproval {
+                    Button(L.t("Approve in Login Items…", "在登录项中允许…")) {
+                        SMAppService.openSystemSettingsLoginItems()
+                    }
+                }
+            }
+            Section {
+                LabeledContent(L.t("Version", "版本"), value: AppVersion.current.display)
+            }
+        }.formStyle(.grouped)
+    }
+
+    private var screenshotSettings: some View {
+        Form {
+            Section {
+                shortcutRow(for: .screenshot)
+                shortcutFeedback
+            } header: {
+                Text(L.t("Capture", "截图"))
+            }
+        }.formStyle(.grouped)
+    }
+
+    private var clipboardSettings: some View {
+        @Bindable var settings = model.settings
+        return Form {
+            Section {
+                shortcutRow(for: .history)
+                shortcutFeedback
+            } header: {
+                Text(L.t("History panel", "历史面板"))
+            }
+            Section {
+                Picker(L.t("Keep history", "保留时间"), selection: $settings.retentionDays) {
+                    ForEach([1, 7, 14, 30, 90, 365], id: \.self) {
+                        Text("\($0) " + L.t("days", "天")).tag($0)
+                    }
+                }
+                Picker(L.t("History limit", "条数上限"), selection: $settings.historyLimit) {
+                    ForEach([100, 250, 500, 1000, 2000], id: \.self) { Text("\($0)").tag($0) }
+                }
+                Button(L.t("Clear history…", "清空历史…")) { model.onClear?() }
+            } header: {
+                Text(L.t("History", "历史记录"))
+            }
+            Section {
+                if !settings.excludedApps.isEmpty {
+                    ScrollView {
+                        VStack(spacing: 10) {
+                            ForEach(settings.excludedApps.sorted(), id: \.self) { bundle in
+                                HStack {
+                                    Text(bundle).font(.system(.caption, design: .monospaced))
+                                        .textSelection(.enabled)
+                                    Spacer()
+                                    Button {
+                                        settings.excludedApps.remove(bundle)
+                                    } label: {
+                                        Image(systemName: "minus.circle")
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityLabel(L.t("Remove exclusion", "移除排除项") + " " + bundle)
+                                }
+                            }
+                        }.padding(.vertical, 2)
+                    }.frame(height: min(132, CGFloat(settings.excludedApps.count) * 26))
+                }
+                HStack {
+                    TextField(L.t("Application bundle ID", "应用标识"), text: $newBundleID)
+                        .onSubmit { addBundleID() }
+                    Button(L.t("Add", "添加")) { addBundleID() }
+                        .disabled(newBundleID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                HStack {
+                    Button(L.t("Choose application…", "选择应用…")) { chooseApplication() }
+                    Spacer()
+                    Button(L.t("Restore defaults", "恢复默认")) {
+                        settings.excludedApps = PrivacyPolicy.defaultExcludedApps
+                    }
+                }
+            } header: {
+                Text(L.t("Excluded applications", "不记录这些应用"))
+            }
+        }.formStyle(.grouped)
+    }
+
+    private func shortcutRow(for action: HotKeyAction) -> some View {
+        let shortcut = action == .history ? model.settings.shortcut : model.settings.screenshotShortcut
+        return HStack {
+            Text(L.t("Shortcut", "快捷键"))
+            Spacer()
+            Button(recording == action ? L.t("Press shortcut…", "按下快捷键…") : shortcut.label) {
+                cancelRecording()
+                recording = action
+                shortcutError = nil
+                model.hotKeys.record { shortcut in
+                    recording = nil
+                    if let shortcut, !model.applyShortcut(shortcut, for: action) {
+                        shortcutError = model.message
+                    }
+                }
+            }
+            .font(.system(.body, design: .monospaced))
+            .frame(minWidth: 88)
+            Button(L.t("Restore default", "恢复默认")) {
+                cancelRecording()
+                shortcutError = nil
+                if !model.applyShortcut(action == .history ? .default : .screenshot, for: action) {
+                    shortcutError = model.message
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var shortcutFeedback: some View {
+        if let shortcutError { Text(shortcutError).font(.caption).foregroundStyle(.orange) }
+    }
+
+    private var permissionSettings: some View {
+        Form {
+            Section {
+                permissionRow(
+                    title: L.t("Clipboard", "剪贴板"), status: clipboardLabel,
+                    granted: model.permissions.allowsMonitoring
+                ) {
+                    if model.permissions.allowsMonitoring { model.permissions.openPrivacy("Privacy_Pasteboard") }
+                    else { model.permissions.requestClipboardAccess() }
+                }
+                permissionRow(
+                    title: L.t("Screen Recording", "屏幕录制"),
+                    status: model.permissions.screenRecording ? L.t("Allowed", "已允许") : L.t("Not allowed", "未授权"),
+                    granted: model.permissions.screenRecording
+                ) {
+                    if model.permissions.screenRecording { model.permissions.openPrivacy("Privacy_ScreenCapture") }
+                    else { model.permissions.requestScreenRecording() }
+                }
+                permissionRow(
+                    title: L.t("Accessibility", "辅助功能"),
+                    status: accessibilityGranted ? L.t("Allowed", "已允许") : L.t("Not allowed", "未授权"),
+                    granted: accessibilityGranted
+                ) {
+                    if accessibilityGranted { model.permissions.openPrivacy("Privacy_Accessibility") }
+                    else { model.permissions.requestAccessibility() }
+                }
+                permissionRow(
+                    title: L.t("Finder Extension", "访达扩展"),
+                    status: model.finderModel.extensionEnabled ? L.t("Enabled", "已启用") : L.t("Not enabled", "未启用"),
+                    granted: model.finderModel.extensionEnabled
+                ) { model.finderModel.manageExtension() }
+            }
+            HStack {
+                Button(L.t("Show application", "定位当前应用")) { model.permissions.revealRunningApplication() }
+                Spacer()
+                Button(L.t("Refresh status", "刷新状态")) { refreshPermissions() }
+            }
+        }.formStyle(.grouped)
+    }
+
+    private func permissionRow(title: String, status: String, granted: Bool, action: @escaping () -> Void) -> some View {
+        HStack(spacing: 12) {
+            PermissionStatusRow(title: title, status: status, granted: granted)
+            Button(granted ? L.t("Manage…", "管理…") : L.t("Enable…", "开启…"), action: action)
+        }
+    }
+
+    private var accessibilityGranted: Bool {
+        model.permissions.accessibility && model.finderModel.automaticRenameEnabled
+    }
+
     private var clipboardLabel: String {
         switch model.permissions.clipboard {
         case .allowed: L.t("Allowed", "已允许")
-        case .needsApproval: L.t("Always Allow needed", "需要始终允许")
+        case .needsApproval: L.t("Approval needed", "待授权")
         case .denied: L.t("Denied", "已拒绝")
         }
     }
+
+    private func refreshPermissions() {
+        model.permissions.refresh()
+        model.finderModel.refreshExtensionStatus()
+        model.mouseScroll.refresh()
+    }
+
+    private func cancelRecording() {
+        model.hotKeys.cancelRecording()
+        recording = nil
+    }
+
     private func addBundleID() {
         let bundle = newBundleID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !bundle.isEmpty, bundle.contains("."), !bundle.contains(where: \.isWhitespace) else {
-            error = L.t(
-                "Enter a valid application bundle ID, such as com.apple.Safari.",
-                "请输入有效的应用 Bundle ID，例如 com.apple.Safari。")
+            error = L.t("Enter a valid application bundle ID.", "请输入有效的应用标识。")
             return
         }
         model.settings.excludedApps.insert(bundle)
         newBundleID = ""
     }
+
     private func chooseApplication() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.applicationBundle]
         panel.directoryURL = URL(fileURLWithPath: "/Applications")
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let url = panel.url, let bundle = Bundle(url: url)?.bundleIdentifier else {
-            return
-        }
+        guard panel.runModal() == .OK, let url = panel.url, let bundle = Bundle(url: url)?.bundleIdentifier else { return }
         model.settings.excludedApps.insert(bundle)
     }
 }

@@ -81,15 +81,23 @@ import Testing
             HistoryView(model: model), size: NSSize(width: 440, height: 590), appearance: .aqua,
             to: output.appendingPathComponent("long-text-preview-light.png"))
         model.preview = nil
-        try await snapshot(
-            SettingsView(model: model), size: NSSize(width: 550, height: 610), appearance: .aqua,
-            to: output.appendingPathComponent("settings.png"))
-        try await snapshot(
-            SettingsView(model: model, initialTab: .privacy), size: NSSize(width: 550, height: 610),
-            appearance: .darkAqua, to: output.appendingPathComponent("settings-privacy-dark.png"))
-        try await snapshot(
-            SettingsView(model: model, initialTab: .permissions), size: NSSize(width: 550, height: 610),
-            appearance: .darkAqua, to: output.appendingPathComponent("settings-permissions-dark.png"))
+        for tab in SettingsTab.allCases {
+            for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+                let mode = appearance == .aqua ? "light" : "dark"
+                try await snapshot(
+                    SettingsView(model: model, initialTab: tab), size: NSSize(width: 600, height: 580),
+                    appearance: appearance,
+                    to: output.appendingPathComponent("settings-\(tab)-\(mode).png"))
+            }
+        }
+        settings.mouse.remoteCompatibility = true
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            let mode = appearance == .aqua ? "light" : "dark"
+            try await snapshot(
+                SettingsView(model: model, initialTab: .mouse), size: NSSize(width: 600, height: 580),
+                appearance: appearance, to: output.appendingPathComponent("settings-mouse-remote-\(mode).png"))
+        }
+        settings.mouse.remoteCompatibility = false
         try await snapshot(
             Form {
                 Section {
