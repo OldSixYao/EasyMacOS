@@ -79,6 +79,12 @@ import PasteManCore
     }
     func ignoreOwnWrite() { resetBaseline(invalidateScreenshots: false) }
 
+    func sourceApplicationChanged() {
+        // 切换前尚未检测的内容无法再确认来源，不按新前台应用回填。
+        // 已捕获的图片已有确定来源，显式截图也携带来源，不能因切换而取消。
+        gate.reset(to: clipboard.changeCount)
+    }
+
     /// The caller synchronously resets the baseline immediately after its successful write.
     /// This explicit path records user-requested screenshots without rereading the pasteboard.
     func screenshotTicket(sourceID: String) -> Int? {

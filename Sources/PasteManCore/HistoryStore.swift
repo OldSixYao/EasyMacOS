@@ -88,6 +88,10 @@ public actor HistoryStore: HistoryRepository {
         if let existing = try db.rows(
             "SELECT id FROM history WHERE hash = ?", [.text(hash)], map: { Database.text($0, 0) }
         ).first {
+            if case .image(let png, let thumbnail) = content {
+                guard let id = UUID(uuidString: existing) else { throw StoreError.missingContent }
+                try restoreMissingImages(id, png: png, thumbnail: thumbnail)
+            }
             try db.execute(
                 "UPDATE history SET copied_at = ?, source_id = ?, source_name = ? WHERE id = ?",
                 [.real(now.timeIntervalSince1970), .text(sourceBundleID), .text(sourceName), .text(existing)])
@@ -210,6 +214,27 @@ public actor HistoryStore: HistoryRepository {
     }
     private func imageURL(_ id: UUID, thumbnail: Bool) -> URL {
         imageDirectory.appendingPathComponent(id.uuidString + (thumbnail ? ".thumb.png" : ".png"))
+    }
+    private func restoreMissingImages(_ id: UUID, png: Data, thumbnail: Data) throws {
+        let fm = FileManager.default
+        var restored: [URL] = []
+        do {
+            for (url, data) in [(imageURL(id, thumbnail: false), png), (imageURL(id, thumbnail: true), thumbnail)] {
+                // 去重只检查存在性，不读取或重写有效的大图；缺失文件从本次复制的数据恢复。
+                var isDirectory: ObjCBool = false
+                if fm.fileExists(atPath: url.path, isDirectory: &isDirectory) {
+                    guard !isDirectory.boolValue else { throw StoreError.missingContent }
+                    continue
+                }
+                try data.write(to: url, options: .atomic)
+                restored.append(url)
+                try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            }
+        } catch {
+            // 仅回滚本次补写的文件，原有图片、记录标识和收藏状态不受影响。
+            for url in restored { try? fm.removeItem(at: url) }
+            throw error
+        }
     }
     private func removeImage(_ id: UUID) throws {
         for thumbnail in [false, true] {

@@ -4,11 +4,12 @@ import ServiceManagement
 import SwiftUI
 
 enum SettingsTab: Int, CaseIterable {
-    case general, privacy, permissions
+    case general, finder, privacy, permissions
 
     var title: String {
         switch self {
         case .general: L.t("General", "通用")
+        case .finder: L.t("Finder", "访达")
         case .privacy: L.t("Privacy", "隐私")
         case .permissions: L.t("Permissions", "权限")
         }
@@ -17,6 +18,7 @@ enum SettingsTab: Int, CaseIterable {
     var symbol: String {
         switch self {
         case .general: "gearshape"
+        case .finder: "cursorarrow.click.2"
         case .privacy: "hand.raised"
         case .permissions: "checkmark.shield"
         }
@@ -48,7 +50,7 @@ struct SettingsView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .textSelection(.disabled)
-            .frame(width: 370)
+            .frame(width: 430)
             .padding(.vertical, 16)
             Divider()
             Group {
@@ -145,12 +147,14 @@ struct SettingsView: View {
                             LabeledContent(L.t("Version", "版本"), value: AppVersion.current.display)
                             Text(
                                 L.t(
-                                    "A little space for your copies.\nStored locally. No cloud sync or analytics.",
-                                    "留住每一次复制。\n仅在本机保存，无云同步与使用追踪。")
+                                    "Clipboard, screenshots and Finder tools.\nStored locally. No cloud sync or analytics.",
+                                    "剪贴板、截图与访达工具，三合一。\n仅在本机保存，无云同步与使用追踪。")
                             )
                             .font(.caption).foregroundStyle(.secondary)
                         }
                     }.formStyle(.grouped)
+                } else if selectedTab == .finder {
+                    FinderSettingsView(model: model.finderModel)
                 } else if selectedTab == .privacy {
                     Form {
                         Section {
@@ -158,8 +162,8 @@ struct SettingsView: View {
                                 L.t("Your clipboard stays on this Mac", "剪贴板内容仅保存在这台 Mac"), systemImage: "lock.shield")
                             Text(
                                 L.t(
-                                    "Marked sensitive or transient content is ignored. App exclusions use the foreground application at copy detection time and cannot identify every password. Pause recording before copying unmarked secrets. Local history is not additionally encrypted.",
-                                    "自动忽略带敏感或临时标记的内容。应用排除根据检测时的前台应用判断，无法识别所有密码。复制未标记的敏感内容前，请暂停记录。本地历史未额外加密。")
+                                    "Marked sensitive or transient content is ignored. App exclusions use the foreground app at detection time. Copies not yet detected are discarded when switching apps to avoid assigning them to the wrong source. This cannot identify every password. Pause recording before copying unmarked secrets. Local history is not additionally encrypted.",
+                                    "自动忽略带敏感或临时标记的内容。应用排除根据检测时的前台应用判断；切换应用时丢弃尚未检测的内容，避免来源误判。仍无法识别所有密码，复制未标记的敏感内容前请暂停记录。本地历史未额外加密。")
                             )
                             .font(.caption).foregroundStyle(.secondary)
                         }
@@ -228,11 +232,11 @@ struct SettingsView: View {
                             Text(
                                 model.permissions.accessibility
                                     ? L.t(
-                                        "Accessibility access is enabled. Select a history item to paste it into the previous application.",
-                                        "已允许辅助功能访问。选择历史记录后，即可粘贴到之前使用的应用。")
+                                        "Accessibility access is enabled. Select a history item to paste into the previous application. New Finder files can also enter inline rename.",
+                                        "已允许辅助功能访问。选择历史记录后可粘贴到之前使用的应用；访达新建文件后也可自动进入原地重命名。")
                                     : L.t(
-                                        "Accessibility access lets EasyMacOS restore the destination app and send ⌘V. Without it, items can still be copied from history.",
-                                        "辅助功能权限用于恢复目标应用并发送 ⌘V。未授权时，仍可从历史中复制内容。")
+                                        "Accessibility access allows automatic paste and inline rename after creating Finder files. Without it, copying and file creation remain available.",
+                                        "辅助功能权限用于自动粘贴，以及访达新建后的原地重命名。未授权时，仍可复制历史内容和新建文件。")
                             )
                             .font(.caption).foregroundStyle(.secondary)
                             if !model.permissions.accessibility {
@@ -241,8 +245,8 @@ struct SettingsView: View {
                                 }
                                 Text(
                                     L.t(
-                                        "Already enabled in System Settings? A local rebuild changes the app signature. Remove the old EasyMacOS entry, add the currently running app below, then quit and reopen EasyMacOS. The green status appears only when macOS allows this version to send keyboard events.",
-                                        "系统开关已开启但这里仍未授权？本地重新构建会改变应用签名。请在系统设置中移除旧 EasyMacOS 条目，重新添加下方定位的当前应用，再退出并重新打开。macOS 允许当前版本发送键盘事件后，这里才会显示绿色。"
+                                        "Already enabled in System Settings? First quit and reopen EasyMacOS. When migrating from an ad-hoc build or changing signing certificates, remove the old entry and add the currently running app below. Rebuilds using the same fixed certificate and app identity keep the signing identity stable.",
+                                        "系统开关已开启但这里仍未授权？请先退出并重新打开。首次从临时签名迁移或更换证书时，需要移除旧条目并添加下方定位的当前应用。使用相同固定证书和应用标识重新构建时，签名身份保持稳定。"
                                     )
                                 )
                                 .font(.caption).foregroundStyle(.secondary)
@@ -288,17 +292,16 @@ struct SettingsView: View {
             model.hotKeys.cancelRecording()
             recording = false
             recordingScreenshot = false
+            model.permissions.refresh()
         }
         .onDisappear {
             model.hotKeys.cancelRecording()
             recording = false
             recordingScreenshot = false
         }
-        .task {
-            while !Task.isCancelled {
-                model.permissions.refresh()
-                try? await Task.sleep(for: .seconds(2))
-            }
+        .onAppear { model.permissions.refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            model.permissions.refresh()
         }
         .alert(
             L.t("EasyMacOS", "EasyMacOS"), isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })

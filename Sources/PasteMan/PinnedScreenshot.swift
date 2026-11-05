@@ -28,8 +28,16 @@ import UniformTypeIdentifiers
 @MainActor final class PinnedScreenshotManager: NSObject, NSWindowDelegate {
     private(set) var windows: [NSWindow] = []
     private let presentWindow: (NSWindow) -> Void
-    init(presentWindow: @escaping (NSWindow) -> Void = { $0.orderFrontRegardless() }) {
+    private let saveImage: (Data) async throws -> Bool
+    private let reportError: (String) -> Void
+    init(
+        presentWindow: @escaping (NSWindow) -> Void = { $0.orderFrontRegardless() },
+        saveImage: @escaping (Data) async throws -> Bool = { try await ScreenshotFileSaver.save($0) },
+        reportError: @escaping (String) -> Void = { PinnedScreenshotView.showError($0) }
+    ) {
         self.presentWindow = presentWindow
+        self.saveImage = saveImage
+        self.reportError = reportError
         super.init()
     }
     var onCopy: ((ScreenshotImage, String, String) -> Bool)?
@@ -49,7 +57,7 @@ import UniformTypeIdentifiers
         window.contentAspectRatio = image.pointSize
         window.contentMinSize = CGSize(width: min(100, image.pointSize.width), height: min(60, image.pointSize.height))
         window.delegate = self
-        let view = PinnedScreenshotView(image: image)
+        let view = PinnedScreenshotView(image: image, saveImage: saveImage, reportError: reportError)
         view.onCopy = { [weak self] in self?.onCopy?(image, sourceID, sourceName) ?? false }
         view.onReset = { [weak window] in window?.setContentSize(image.pointSize) }
         view.onClose = { [weak window] in window?.close() }
@@ -70,11 +78,13 @@ import UniformTypeIdentifiers
     }
     func windowWillClose(_ notification: Notification) {
         guard let window = notification.object as? NSWindow else { return }
+        (window.contentView as? PinnedScreenshotView)?.dispose()
         window.contentView = nil
         windows.removeAll { $0 === window }
     }
     func closeAll() {
         for window in windows {
+            (window.contentView as? PinnedScreenshotView)?.dispose()
             window.contentView = nil
             window.close()
         }
@@ -87,12 +97,18 @@ import UniformTypeIdentifiers
     var onCopy: (() -> Bool)?
     var onReset: (() -> Void)?
     var onClose: (() -> Void)?
-    init(image: ScreenshotImage) {
+    private let saveImageData: (Data) async throws -> Bool
+    private let reportError: (String) -> Void
+    private var saveTask: Task<Void, Never>?
+    private var disposed = false
+    init(image: ScreenshotImage, saveImage: @escaping (Data) async throws -> Bool, reportError: @escaping (String) -> Void) {
         self.image = image
+        saveImageData = saveImage
+        self.reportError = reportError
         super.init(frame: .zero)
         toolTip = L.t(
-            "Drag to move. Double-click to dismiss. Resize from the edges. Right-click to copy or save.",
-            "拖动移动，双击关闭钉图，拖拽边缘缩放。右键可复制或保存。")
+            "Drag to move. Double-click to dismiss. Scroll or resize from the edges to zoom. Right-click to copy or save.",
+            "拖动移动，双击关闭钉图，滚轮或拖拽边缘缩放。右键可复制或保存。")
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override var mouseDownCanMoveWindow: Bool { false }
@@ -103,6 +119,32 @@ import UniformTypeIdentifiers
         } else if event.clickCount == 1 {
             window?.performDrag(with: event)
         }
+    }
+    override func scrollWheel(with event: NSEvent) {
+        guard let window, event.momentumPhase.isEmpty,
+            event.scrollingDeltaY.isFinite, event.scrollingDeltaY != 0,
+            bounds.width > 0, bounds.height > 0
+        else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        guard bounds.contains(point) else { return }
+
+        // Precise devices report point deltas; wheel mice report discrete steps.
+        let delta = event.scrollingDeltaY * (event.hasPreciseScrollingDeltas ? 0.01 : 0.1)
+        let currentScale = bounds.width / image.pointSize.width
+        let minimumScale = max(
+            0.1, window.contentMinSize.width / image.pointSize.width,
+            window.contentMinSize.height / image.pointSize.height)
+        let scale = min(8, max(minimumScale, currentScale * exp(max(-0.5, min(0.5, delta)))))
+        guard abs(scale - currentScale) > 0.000001 else { return }
+
+        let size = CGSize(width: image.pointSize.width * scale, height: image.pointSize.height * scale)
+        let anchor = window.convertPoint(toScreen: event.locationInWindow)
+        let fraction = CGPoint(x: (point.x - bounds.minX) / bounds.width, y: (point.y - bounds.minY) / bounds.height)
+        // Keep the image point beneath the pointer stationary while resizing the borderless panel.
+        let frame = CGRect(
+            x: anchor.x - fraction.x * size.width, y: anchor.y - fraction.y * size.height,
+            width: size.width, height: size.height)
+        window.setFrame(frame, display: true)
     }
     override func draw(_ dirtyRect: NSRect) {
         guard let context = NSGraphicsContext.current?.cgContext else { return }
@@ -122,16 +164,34 @@ import UniformTypeIdentifiers
         return menu
     }
     @objc private func copyImage() {
-        if onCopy?() != true { showError(L.t("Could not write to the clipboard.", "无法写入剪贴板。")) }
+        if onCopy?() != true { reportError(L.t("Could not write to the clipboard.", "无法写入剪贴板。")) }
     }
     @objc private func saveImage() {
-        Task {
-            do { _ = try await ScreenshotFileSaver.save(image.png) } catch { showError(error.localizedDescription) }
+        guard !disposed, saveTask == nil else { return }
+        saveTask = Task { [weak self, saveImageData, png = image.png] in
+            defer { self?.saveTask = nil }
+            do {
+                try Task.checkCancellation()
+                _ = try await saveImageData(png)
+            } catch is CancellationError {
+                // 关闭钉图会取消保存，不再弹出错误或重新激活应用。
+            } catch {
+                guard !Task.isCancelled, let self, !self.disposed else { return }
+                self.reportError(error.localizedDescription)
+            }
         }
+    }
+    func dispose() {
+        disposed = true
+        saveTask?.cancel()
+        saveTask = nil
+        onCopy = nil
+        onReset = nil
+        onClose = nil
     }
     @objc private func resetSize() { onReset?() }
     @objc private func closeImage() { onClose?() }
-    private func showError(_ message: String) {
+    static func showError(_ message: String) {
         let alert = NSAlert()
         alert.messageText = "EasyMacOS"
         alert.informativeText = message

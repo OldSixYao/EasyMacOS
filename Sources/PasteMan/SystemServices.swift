@@ -98,8 +98,8 @@ enum ClipboardSnapshot: Sendable {
         if !screenRecording { openPrivacy("Privacy_ScreenCapture") }
     }
     func requestAccessibility() {
-        accessibility = CGRequestPostEventAccess()
-        if !accessibility { openPrivacy("Privacy_Accessibility") }
+        FinderRenameAccess.request()
+        accessibility = CGPreflightPostEventAccess()
     }
     func revealRunningApplication() {
         NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])

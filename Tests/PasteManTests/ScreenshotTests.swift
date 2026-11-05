@@ -416,6 +416,81 @@ private func pixel(_ image: CGImage, _ x: Int, _ y: Int) -> [UInt8] {
         #expect(pins.count == 0)
     }
 
+    private func scrollEvent(delta: Int32, at point: CGPoint, precise: Bool = false, momentum: Bool = false) throws -> NSEvent {
+        let cgEvent = try #require(CGEvent(
+            scrollWheelEvent2Source: nil, units: precise ? .pixel : .line,
+            wheelCount: 2, wheel1: delta, wheel2: 0, wheel3: 0))
+        cgEvent.location = CGPoint(x: point.x, y: (NSScreen.screens.first?.frame.maxY ?? 0) - point.y)
+        if momentum { cgEvent.setIntegerValueField(.scrollWheelEventMomentumPhase, value: 1) }
+        return try #require(NSEvent(cgEvent: cgEvent))
+    }
+
+    @Test func pinnedScrollZoomKeepsAspectAndPointerAnchorWithoutChangingOtherPins() throws {
+        let image = try ScreenshotRenderer.export(
+            base: testImage(width: 600, height: 400), pointSize: CGSize(width: 600, height: 400), annotations: [])
+        let pins = PinnedScreenshotManager(presentWindow: { _ in })
+        defer { pins.closeAll() }
+        pins.show(image, sourceID: "test.scroll", sourceName: "Editor", origin: .zero)
+        pins.show(image, sourceID: "test.scroll", sourceName: "Editor", origin: .zero)
+        let window = try #require(pins.windows.first)
+        let view = try #require(window.contentView)
+        let otherFrame = pins.windows[1].frame
+        window.setFrame(CGRect(x: -700, y: 100, width: 600, height: 400), display: false)
+        let event = try scrollEvent(delta: 1, at: CGPoint(x: 150, y: 100))
+        #expect(event.type == .scrollWheel && !event.hasPreciseScrollingDeltas)
+        #expect(view.bounds.contains(event.locationInWindow))
+        let anchor = window.convertPoint(toScreen: event.locationInWindow)
+        let initialSize = view.bounds.size
+        view.scrollWheel(with: event)
+        #expect(view.bounds.width > initialSize.width)
+        #expect(abs(view.bounds.width / view.bounds.height - 1.5) < 0.01)
+        let newAnchor = CGPoint(x: window.frame.minX + view.bounds.width * 0.25, y: window.frame.minY + view.bounds.height * 0.25)
+        #expect(abs(newAnchor.x - anchor.x) <= 1 && abs(newAnchor.y - anchor.y) <= 1)
+        let enlarged = view.bounds.width
+        view.scrollWheel(with: try scrollEvent(delta: -1, at: CGPoint(x: 150, y: 100)))
+        #expect(view.bounds.width < enlarged)
+        #expect(abs(view.bounds.width - initialSize.width) <= 2)
+        let precise = try scrollEvent(delta: 5, at: CGPoint(x: 150, y: 100), precise: true)
+        #expect(precise.hasPreciseScrollingDeltas)
+        view.scrollWheel(with: precise)
+        #expect(view.bounds.width > initialSize.width && view.bounds.width < enlarged)
+        #expect(pins.windows[1].frame == otherFrame)
+        let beforeIgnoredEvents = window.frame
+        view.scrollWheel(with: try scrollEvent(delta: 10, at: CGPoint(x: 150, y: 100), precise: true, momentum: true))
+        view.scrollWheel(with: try scrollEvent(delta: 0, at: CGPoint(x: 150, y: 100)))
+        view.scrollWheel(with: try scrollEvent(delta: 1, at: CGPoint(x: -10, y: -10)))
+        #expect(window.frame == beforeIgnoredEvents)
+    }
+
+    @Test func pinnedScrollZoomClampsRepeatedInputAndPreservesOriginalCopyAndReset() throws {
+        let image = try ScreenshotRenderer.export(
+            base: testImage(width: 600, height: 400), pointSize: CGSize(width: 600, height: 400), annotations: [])
+        let pins = PinnedScreenshotManager(presentWindow: { _ in })
+        defer { pins.closeAll() }
+        pins.show(image, sourceID: "test.scroll", sourceName: "Editor", origin: .zero)
+        let window = try #require(pins.windows.first)
+        let view = try #require(window.contentView)
+        let increase = try scrollEvent(delta: 1000, at: CGPoint(x: 10, y: 10))
+        let decrease = try scrollEvent(delta: -1000, at: CGPoint(x: 10, y: 10))
+        for _ in 0..<30 { view.scrollWheel(with: increase) }
+        #expect(abs(view.bounds.width - 4800) <= 1 && abs(view.bounds.height - 3200) <= 1)
+        for _ in 0..<40 { view.scrollWheel(with: decrease) }
+        #expect(abs(view.bounds.width - 100) <= 1)
+        #expect(view.bounds.height >= window.contentMinSize.height)
+        var copied: ScreenshotImage?
+        pins.onCopy = { value, _, _ in copied = value; return true }
+        let menu = try #require(view.menu(for: increase))
+        let copy = try #require(menu.items.first)
+        #expect(NSApp.sendAction(try #require(copy.action), to: copy.target, from: copy))
+        #expect(copied?.png == image.png && copied?.pointSize == image.pointSize)
+        #expect(copied?.image === image.image)
+        let reset = menu.items[2]
+        #expect(NSApp.sendAction(try #require(reset.action), to: reset.target, from: reset))
+        #expect(view.bounds.size == image.pointSize)
+        view.scrollWheel(with: decrease)
+        #expect(view.bounds.width < image.pointSize.width)
+    }
+
     @Test func cursorColorCopyStaysInSelectionAndToolbarDefaultsToOneRow() throws {
         let coordinator = ScreenshotCoordinator(presentWindow: { _ in })
         let screen = ScreenshotScreen(id: 1, frame: CGRect(x: -800, y: 0, width: 800, height: 600), scale: 1)

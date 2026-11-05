@@ -189,6 +189,97 @@ import Testing
         #expect(try await f.store.list().isEmpty)
     }
 
+    @Test func switchingApplicationsDoesNotAttributeExcludedCopyToNewApplication() async throws {
+        let f = try CaptureFixture()
+        defer { f.clean() }
+        var sourceID = "test.private"
+        f.settings.excludedApps.insert(sourceID)
+        let monitor = ClipboardMonitor(
+            clipboard: f.clipboard, repository: f.store, settings: f.settings, permissions: f.permissions,
+            sourceApplication: { (sourceID, sourceID) })
+        f.clipboard.copy("复制后尚未轮询的私密内容")
+        sourceID = "test.editor"
+        monitor.sourceApplicationChanged()
+        await monitor.poll()
+        #expect(f.clipboard.reads == 0)
+        #expect(try await f.store.list().isEmpty)
+
+        f.clipboard.copy("切换后在编辑器主动复制的新内容")
+        await monitor.poll()
+        let entries = try await f.store.list()
+        #expect(entries.count == 1)
+        #expect(entries.first?.preview == "切换后在编辑器主动复制的新内容")
+        #expect(entries.first?.sourceBundleID == "test.editor")
+    }
+
+    @Test func switchingApplicationsKeepsImageWhoseSourceWasAlreadyCaptured() async throws {
+        let f = try CaptureFixture()
+        defer { f.clean() }
+        let work = ImageWork()
+        let monitor = f.monitor(prepare: { _ in
+            await work.wait()
+            return .image(png: Data([1]), thumbnail: Data([2]))
+        })
+        f.clipboard.snapshot = .image(Data([0]))
+        f.clipboard.changeCount += 1
+        let poll = Task { await monitor.poll() }
+        await work.waitUntilStarted()
+        monitor.sourceApplicationChanged()
+        await work.resume()
+        await poll.value
+        let entries = try await f.store.list()
+        #expect(entries.count == 1)
+        #expect(entries.first?.sourceBundleID == "test.editor")
+        #expect(f.clipboard.reads == 1)
+    }
+
+    @Test func switchingApplicationsKeepsExplicitScreenshotTicketAndSelfWriteBaseline() async throws {
+        let f = try CaptureFixture()
+        defer { f.clean() }
+        let monitor = f.monitor(prepare: { _ in .image(png: Data([1]), thumbnail: Data([2])) })
+        f.clipboard.copy("自己写入的内容")
+        monitor.ignoreOwnWrite()
+        let ticket = try #require(monitor.screenshotTicket(sourceID: "test.screenshotSource"))
+        monitor.sourceApplicationChanged()
+        await monitor.poll()
+        #expect(f.clipboard.reads == 0)
+        try await monitor.recordScreenshot(
+            Data([0]), sourceID: "test.screenshotSource", sourceName: "Screenshot source", ticket: ticket)
+        let entries = try await f.store.list()
+        #expect(entries.count == 1)
+        #expect(entries.first?.sourceBundleID == "test.screenshotSource")
+    }
+
+    @Test func confirmedClearInvalidatesPendingImageAndScreenshotWithoutRefillingHistory() async throws {
+        for explicitScreenshot in [false, true] {
+            let f = try CaptureFixture()
+            defer { f.clean() }
+            let work = ImageWork()
+            let monitor = f.monitor(prepare: { _ in
+                await work.wait()
+                return .image(png: Data([1]), thumbnail: Data([2]))
+            })
+            let pending: Task<Void, Error>
+            if explicitScreenshot {
+                let ticket = try #require(monitor.screenshotTicket(sourceID: "test.editor"))
+                pending = Task {
+                    try await monitor.recordScreenshot(Data([0]), sourceID: "test.editor", sourceName: "Editor", ticket: ticket)
+                }
+            } else {
+                f.clipboard.snapshot = .image(Data([0]))
+                f.clipboard.changeCount += 1
+                pending = Task { await monitor.poll() }
+            }
+            await work.waitUntilStarted()
+            // 与确认清空后的生产入口顺序一致；取消确认时不调用此重置。
+            monitor.resetBaseline()
+            try await f.store.clear(includingFavorites: true)
+            await work.resume()
+            try await pending.value
+            #expect(try await f.store.list().isEmpty)
+        }
+    }
+
     @Test func namedPasteboardChoosesImageBeforeTextAndSkipsFiles() throws {
         let board = NSPasteboard.withUniqueName()
         defer { board.releaseGlobally() }

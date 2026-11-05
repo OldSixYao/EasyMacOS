@@ -169,6 +169,105 @@ private struct Fixture {
         try await f.store.delete(entry.id)
         #expect(try await f.store.list().isEmpty)
     }
+
+    @Test(arguments: [1, 2, 3]) func recopyingImageRestoresMissingFilesWithoutReplacingFavorite(_ missing: Int) async throws {
+        let f = try Fixture()
+        defer { f.clean() }
+        let content = try ImageProcessor.prepare(makePNG())
+        guard case .image(let png, let thumbnail) = content else { return }
+        try await f.store.save(
+            content, sourceBundleID: "test.original", sourceName: "Original", policy: RetentionPolicy(), now: f.now)
+        let original = try #require(try await f.store.list().first)
+        try await f.store.setFavorite(original.id, value: true)
+        let imageURL = f.directory.appendingPathComponent("Images/\(original.id.uuidString).png")
+        let thumbURL = f.directory.appendingPathComponent("Images/\(original.id.uuidString).thumb.png")
+        let files = [(imageURL, png, 1), (thumbURL, thumbnail, 2)]
+        let oldDate = f.now.addingTimeInterval(-100)
+        for (url, _, bit) in files {
+            if missing & bit != 0 { try FileManager.default.removeItem(at: url) }
+            else { try FileManager.default.setAttributes([.modificationDate: oldDate], ofItemAtPath: url.path) }
+        }
+        let copiedAt = f.now.addingTimeInterval(20)
+        try await f.store.save(
+            content, sourceBundleID: "test.recopy", sourceName: "Recopy", policy: RetentionPolicy(), now: copiedAt)
+        let entries = try await f.store.list()
+        let restored = try #require(entries.first)
+        #expect(entries.count == 1)
+        #expect(restored.id == original.id)
+        #expect(restored.isFavorite)
+        #expect(restored.copiedAt == copiedAt)
+        #expect(restored.sourceBundleID == "test.recopy")
+        #expect(restored.byteCount == original.byteCount)
+        for (url, expected, bit) in files {
+            #expect(try Data(contentsOf: url) == expected)
+            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+            #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+            if missing & bit == 0 { #expect(attributes[.modificationDate] as? Date == oldDate) }
+        }
+        guard case .image(let restoredPNG, _) = try await f.store.content(for: restored) else {
+            Issue.record("重新复制后应恢复图片内容")
+            return
+        }
+        #expect(restoredPNG == png)
+        #expect(try await f.store.imageData(for: restored.id, thumbnail: true) == thumbnail)
+    }
+
+    @Test(arguments: [1, 2, 3]) func failedImageRepairKeepsExistingFilesAndRecord(_ missing: Int) async throws {
+        let f = try Fixture()
+        let images = f.directory.appendingPathComponent("Images")
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: images.path)
+            f.clean()
+        }
+        let content = try ImageProcessor.prepare(makePNG())
+        guard case .image(let png, let thumbnail) = content else { return }
+        try await f.store.save(
+            content, sourceBundleID: "test.original", sourceName: "Original", policy: RetentionPolicy(), now: f.now)
+        let original = try #require(try await f.store.list().first)
+        try await f.store.setFavorite(original.id, value: true)
+        let before = try await f.store.list()
+        let imageURL = images.appendingPathComponent("\(original.id.uuidString).png")
+        let thumbURL = images.appendingPathComponent("\(original.id.uuidString).thumb.png")
+        let files = [(imageURL, png, 1), (thumbURL, thumbnail, 2)]
+        for (url, _, bit) in files where missing & bit != 0 { try FileManager.default.removeItem(at: url) }
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: images.path)
+        await #expect(throws: (any Error).self) {
+            try await f.store.save(
+                content, sourceBundleID: "test.failed", sourceName: "Failed", policy: RetentionPolicy(),
+                now: f.now.addingTimeInterval(20))
+        }
+        #expect(try await f.store.list() == before)
+        for (url, expected, bit) in files {
+            if missing & bit != 0 { #expect(!FileManager.default.fileExists(atPath: url.path)) }
+            else { #expect(try Data(contentsOf: url) == expected) }
+        }
+    }
+
+    @Test func failedThumbnailRepairRollsBackOnlyNewOriginalFile() async throws {
+        let f = try Fixture()
+        defer { f.clean() }
+        let content = try ImageProcessor.prepare(makePNG())
+        try await f.store.save(
+            content, sourceBundleID: "test.original", sourceName: "Original", policy: RetentionPolicy(), now: f.now)
+        let original = try #require(try await f.store.list().first)
+        try await f.store.setFavorite(original.id, value: true)
+        let before = try await f.store.list()
+        let image = f.directory.appendingPathComponent("Images/\(original.id.uuidString).png")
+        let blockedThumbnail = f.directory.appendingPathComponent("Images/\(original.id.uuidString).thumb.png")
+        try FileManager.default.removeItem(at: image)
+        try FileManager.default.removeItem(at: blockedThumbnail)
+        try FileManager.default.createDirectory(at: blockedThumbnail, withIntermediateDirectories: false)
+        let sentinel = blockedThumbnail.appendingPathComponent("必须保留")
+        try Data([42]).write(to: sentinel)
+        await #expect(throws: StoreError.missingContent) {
+            try await f.store.save(
+                content, sourceBundleID: "test.failed", sourceName: "Failed", policy: RetentionPolicy(),
+                now: f.now.addingTimeInterval(20))
+        }
+        #expect(try await f.store.list() == before)
+        #expect(!FileManager.default.fileExists(atPath: image.path))
+        #expect(try Data(contentsOf: sentinel) == Data([42]))
+    }
 }
 
 @Suite("Capture privacy and image limits") struct CaptureTests {

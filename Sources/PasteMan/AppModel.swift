@@ -7,6 +7,7 @@ import PasteManCore
     let settings: AppSettings
     let permissions: PermissionService
     let hotKeys: HotKeyService
+    @ObservationIgnored let finderModel: FinderModel
     private(set) var entries: [HistoryEntry] = []
     private(set) var sources: [SourceApplication] = []
     private(set) var loading = false
@@ -42,6 +43,7 @@ import PasteManCore
         self.settings = settings
         self.permissions = permissions
         self.hotKeys = hotKeys
+        self.finderModel = FinderModel()
         self.pasteExecutor = pasteExecutor
         self.clipboardWriter = clipboardWriter
     }

@@ -6,8 +6,8 @@
     <key>CFBundleIdentifier</key><string>app.pasteman.PasteMan</string>
     <key>CFBundleExecutable</key><string>EasyMacOS</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.0.6</string>
-    <key>CFBundleVersion</key><string>7</string>
+    <key>CFBundleShortVersionString</key><string>1.0.18</string>
+    <key>CFBundleVersion</key><string>19</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>LSMinimumSystemVersion</key><string>15.0</string>
     <key>LSUIElement</key><true/>
@@ -15,5 +15,10 @@
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>CFBundleDevelopmentRegion</key><string>en</string>
     <key>CFBundleLocalizations</key><array><string>en</string><string>zh-Hans</string></array>
+    <key>CFBundleURLTypes</key><array><dict>
+        <key>CFBundleURLName</key><string>EasyMacOS.Finder</string>
+        <key>CFBundleURLSchemes</key><array><string>easymacos</string></array>
+        <key>CFBundleTypeRole</key><string>Editor</string>
+    </dict></array>
     <key>NSPasteboardUsageDescription</key><string>EasyMacOS saves copied text and images locally so you can find and paste them again.</string>
 </dict></plist>

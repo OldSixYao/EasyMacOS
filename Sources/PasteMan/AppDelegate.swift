@@ -1,5 +1,6 @@
 import AppKit
 import Carbon
+import FinderMenuCore
 import PasteManCore
 import SwiftUI
 
@@ -39,6 +40,7 @@ import SwiftUI
     private var lastExternalApp: NSRunningApplication?
     private var workspaceObserver: NSObjectProtocol?
     private var menuOpen = false
+    private let finderRequests = FinderRequestQueue()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -132,7 +134,12 @@ import SwiftUI
                     state.message = L.error(error)
                 }
             }
-            if !settings.hasOnboarded { showWelcome() }
+            let openingFinderSettings = CommandLine.arguments.contains("--finder-settings")
+            if !settings.hasOnboarded, !finderRequests.hasPending, !openingFinderSettings { showWelcome() }
+            if openingFinderSettings { showFinderSettings() }
+            DispatchQueue.main.async { [weak self] in
+                self?.finderRequests.start { [weak self] url in await self?.handleFinderRequest(url) }
+            }
         } catch {
             let alert = NSAlert()
             alert.messageText = L.t("EasyMacOS could not open history", "EasyMacOS 无法打开历史记录")
@@ -141,6 +148,22 @@ import SwiftUI
             NSApp.terminate(nil)
         }
     }
+    func application(_ application: NSApplication, open urls: [URL]) {
+        finderRequests.enqueue(urls.filter { $0.scheme == FinderRequest.scheme })
+    }
+
+    private func handleFinderRequest(_ url: URL) async {
+        if url == FinderRequest.settingsURL {
+            showFinderSettings()
+            return
+        }
+        do {
+            let request = try FinderRequest(url: url)
+            hidePanel()
+            await FinderActionHandler().perform(request)
+        } catch { FinderActionHandler.show(error) }
+    }
+
     private func setupMainMenu() {
         let main = NSMenu()
         let appItem = NSMenuItem()
@@ -170,12 +193,15 @@ import SwiftUI
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         guard let button = statusItem.button else { return }
-        button.image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: "EasyMacOS")
-        button.image?.isTemplate = true
-        button.toolTip = AppVersion.current.applicationLabel
+        refreshRecordingStatus()
         button.target = self
         button.action = #selector(statusClicked)
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+    }
+    private func refreshRecordingStatus() {
+        guard let model, let button = statusItem?.button else { return }
+        RecordingStatusAppearance(paused: model.settings.paused, applicationLabel: AppVersion.current.applicationLabel)
+            .apply(to: button)
     }
     private func trackExternalApps() {
         let ownPID = ProcessInfo.processInfo.processIdentifier
@@ -183,10 +209,10 @@ import SwiftUI
         workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
         ) { [weak self] note in
-            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-                app.processIdentifier != ownPID
-            else { return }
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             MainActor.assumeIsolated {
+                self?.monitor?.sourceApplicationChanged()
+                guard app.processIdentifier != ownPID else { return }
                 self?.lastExternalApp = app
                 self?.hidePanel()
             }
@@ -297,6 +323,7 @@ import SwiftUI
         addMenu(
             menu, L.t("Screenshot", "截图") + "  " + model.settings.screenshotShortcut.label, #selector(startScreenshot))
         addMenu(menu, L.t("Close all pinned screenshots", "关闭所有钉图"), #selector(closeAllPins))
+        addMenu(menu, L.t("Finder menu…", "访达右键…"), #selector(showFinderSettings))
         menu.addItem(.separator())
         addMenu(
             menu, model.settings.paused ? L.t("Resume recording", "恢复记录") : L.t("Pause recording", "暂停记录"),
@@ -349,14 +376,7 @@ import SwiftUI
     @objc private func togglePause() {
         guard let model else { return }
         model.settings.paused.toggle()
-        statusItem.button?.image = NSImage(
-            systemSymbolName: model.settings.paused ? "pause.circle" : "doc.on.clipboard",
-            accessibilityDescription: "EasyMacOS")
-        statusItem.button?.image?.isTemplate = true
-        statusItem.button?.toolTip =
-            model.settings.paused
-            ? AppVersion.current.applicationLabel + L.t(" — Paused", " — 已暂停")
-            : AppVersion.current.applicationLabel
+        refreshRecordingStatus()
     }
     @objc private func confirmClear() {
         guard let model else { return }
@@ -378,7 +398,10 @@ import SwiftUI
             model.clear(includingFavorites: checkbox.state == .on)
         }
     }
-    @objc private func showSettings() {
+    @objc private func showSettings() { presentSettings() }
+    @objc private func showFinderSettings() { presentSettings(initialTab: .finder) }
+
+    private func presentSettings(initialTab: SettingsTab? = nil) {
         guard let model else { return }
         hidePanel()
         if settingsWindow == nil {
@@ -386,11 +409,13 @@ import SwiftUI
                 contentRect: .zero, styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
             window.title = L.t("EasyMacOS Settings", "EasyMacOS 设置")
             window.delegate = self
-            window.contentView = NSHostingView(rootView: SettingsView(model: model))
+            window.contentView = NSHostingView(rootView: SettingsView(model: model, initialTab: initialTab ?? .general))
             window.setContentSize(NSSize(width: 550, height: 610))
             window.isReleasedWhenClosed = false
             window.center()
             settingsWindow = window
+        } else if let initialTab {
+            settingsWindow?.contentView = NSHostingView(rootView: SettingsView(model: model, initialTab: initialTab))
         }
         model.permissions.refresh()
         NSApp.activate()
