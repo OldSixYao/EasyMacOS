@@ -13,12 +13,136 @@ private func enabledMouse(smooth: Bool = true, reversed: Bool = false, speed: Do
     return configuration
 }
 
-private func wheel(x: Double = 0, y: Double = 10) -> MouseScrollInput {
+private func wheel(x: Double = 0, y: Double = 40) -> MouseScrollInput {
     MouseScrollInput(delta: MouseScrollVector(x: x, y: y), targetPID: 12345,
                      targetWindow: 91, targetBundleID: "test.scroll")
 }
 
 @Suite("鼠标滚动计算") struct MouseScrollEngineTests {
+    @Test func smoothingIsIdenticalForBrowsersAndUnlistedApplications() {
+        var reference: [MouseScrollVector]?
+        for bundle in ["com.google.Chrome", "com.apple.Safari", "test.unlisted.player", "test.reader"] {
+            var processor = MouseScrollProcessor(configuration: enabledMouse(), ownPID: 42)
+            var input = wheel(y: 8)
+            input.targetBundleID = bundle
+            #expect(processor.receive(input, at: 0) == .smooth)
+            let output = (1...48).map { processor.sample(at: Double($0) / 120) }
+            if let reference { #expect(output == reference) } else { reference = output }
+            #expect(output.filter { !$0.isZero }.count > 1)
+            #expect(output.reduce(0) { $0 + $1.y } == 8)
+        }
+    }
+
+    @Test func adaptiveResponsePreservesDistanceAcrossDurationAndSpeedSettings() {
+        for duration in [0.08, 0.18, 0.4] {
+            for speed in [0.5, 1, 2.2, 3] {
+                for distance in [2.0, 8, 40, 80, -2, -8, -40, -80] {
+                    var configuration = enabledMouse(speed: speed)
+                    configuration.duration = duration
+                    var processor = MouseScrollProcessor(configuration: configuration, ownPID: 42)
+                    #expect(processor.receive(wheel(y: distance), at: 0) == .smooth)
+                    var total = 0.0
+                    for frame in 1...60 {
+                        let delta = processor.sample(at: Double(frame) / 120).y
+                        #expect(delta == 0 || delta.sign == distance.sign)
+                        total += delta
+                    }
+                    #expect(abs(total - distance * speed) < 1)
+                    #expect(!processor.hasPending)
+                }
+            }
+        }
+    }
+
+    @Test func ordinaryPageSmallWheelsAlwaysUseSmoothPixels() {
+        for speed in [0.5, 1, 2.2, 3] {
+            var processor = MouseScrollProcessor(configuration: enabledMouse(speed: speed), ownPID: 42)
+            for (index, delta) in [8.0, 12, 8, 40, 8].enumerated() {
+                let time = Double(index)
+                #expect(processor.receive(wheel(y: delta), at: time) == .smooth)
+                #expect(processor.hasPending)
+                var sum = 0.0
+                var frames = 0
+                for frame in 1...24 {
+                    let output = processor.sample(at: time + Double(frame) / 120).y
+                    sum += output
+                    if output != 0 { frames += 1 }
+                }
+                #expect(abs(sum - delta * speed) < 1)
+                #expect(frames > 1)
+                #expect(!processor.hasPending)
+            }
+        }
+    }
+
+    @Test func shortScrollRespondsEarlyWithoutChangingEventModeOrDistance() {
+        for speed in [1.0, 2.2, 3] {
+            for reversed in [false, true] {
+                var configuration = enabledMouse(reversed: reversed, speed: speed)
+                configuration.remoteCompatibility = true
+                var processor = MouseScrollProcessor(configuration: configuration, ownPID: 42)
+                var input = wheel(y: 8)
+                input.continuous = true
+                #expect(processor.receive(input, at: 0) == .smooth)
+                let first = processor.sample(at: 1 / 120.0).y
+                #expect(abs(first) >= 3)
+                #expect(abs(first) < 8 * speed)
+                var total = first
+                for frame in 2...48 { total += processor.sample(at: Double(frame) / 120).y }
+                #expect(abs(total - 8 * configuration.multiplier) < 1)
+                #expect(!processor.hasPending)
+            }
+        }
+    }
+
+    @Test func smallWheelsRemainSmoothBeforeDuringAndAfterLargeAnimation() {
+        var processor = MouseScrollProcessor(configuration: enabledMouse(), ownPID: 42)
+        #expect(processor.receive(wheel(y: 40), at: 0) == .smooth)
+        #expect(processor.receive(wheel(y: 5), at: 0.01) == .smooth)
+        #expect(processor.sample(at: 1).y == 45)
+        #expect(processor.receive(wheel(y: 5), at: 2) == .smooth)
+        #expect(processor.sample(at: 3).y == 5)
+        #expect(processor.receive(wheel(y: 40), at: 4) == .smooth)
+        var otherWindow = wheel(y: 5)
+        otherWindow.targetWindow += 1
+        #expect(processor.receive(otherWindow, at: 4.01) == .smooth)
+        #expect(processor.sample(at: 5).y == 5)
+    }
+
+    @Test func permissionGateReusesResultsWithinBoundedActiveInterval() {
+        var gate = MouseScrollPermissionGate()
+        var checks = 0
+        for frame in 0..<120 {
+            let allowed = gate.allows(at: Double(frame) / 120) { checks += 1; return true }
+            #expect(allowed)
+        }
+        #expect(checks >= 9 && checks <= 11)
+    }
+
+    @Test func permissionGateRechecksRevocationForcedRecoveryAndClockChanges() {
+        var gate = MouseScrollPermissionGate()
+        var allowed = true
+        var checks = 0
+        func check() -> Bool { checks += 1; return allowed }
+        let initial = gate.allows(at: 1, check: check)
+        #expect(initial)
+        allowed = false
+        let cached = gate.allows(at: 1.09, check: check)
+        let revoked = gate.allows(at: 1.101, check: check)
+        #expect(cached)
+        #expect(!revoked)
+        #expect(checks == 2)
+        allowed = true
+        let restored = gate.allows(at: 1.11, force: true, check: check)
+        #expect(restored)
+        allowed = false
+        let reversedClock = gate.allows(at: 0.5, check: check)
+        let invalidClock = gate.allows(at: .nan, check: check)
+        #expect(!reversedClock)
+        #expect(!invalidClock)
+        #expect(checks == 4)
+    }
+
     @Test func smoothDistanceAndSpeedAreIndependentOfFrameRate() {
         for frames in [12, 30, 60, 120] {
             var processor = MouseScrollProcessor(configuration: enabledMouse(speed: 1.5), ownPID: 42)
@@ -152,14 +276,14 @@ private func wheel(x: Double = 0, y: Double = 10) -> MouseScrollInput {
             generated.generated = true
             #expect(processor.receive(generated, at: 0.01) == .passThrough)
             #expect(processor.hasPending)
-            var next = wheel(y: 3)
+            var next = wheel(y: 30)
             switch contextChange {
             case 0: next.targetPID += 1
             case 1: next.targetWindow += 1
             default: next.flags = 1
             }
             _ = processor.receive(next, at: 0.02)
-            #expect(processor.sample(at: 1).y == 3)
+            #expect(processor.sample(at: 1).y == 30)
             _ = processor.receive(wheel(), at: 2)
             processor.configure(enabledMouse(speed: 2))
             #expect(!processor.hasPending && processor.context == nil)
@@ -245,6 +369,33 @@ private func wheel(x: Double = 0, y: Double = 10) -> MouseScrollInput {
         #expect(output.getIntegerValueField(.mouseEventWindowUnderMousePointer)
                 == template.getIntegerValueField(.mouseEventWindowUnderMousePointer))
         #expect(output.getIntegerValueField(.eventSourceUserData) == MouseScrollEventAdapter.marker)
+    }
+
+    @Test func immediateWheelsKeepNativeUnitsAndMetadataWhileApplyingSpeedAndDirection() throws {
+        for precise in [false, true] {
+            let event = try #require(CGEvent(scrollWheelEvent2Source: nil, units: precise ? .pixel : .line,
+                                            wheelCount: 2, wheel1: precise ? 8 : 1, wheel2: 0, wheel3: 0))
+            event.setIntegerValueField(.eventTargetUnixProcessID, value: 12345)
+            event.flags = .maskShift
+            event.location = CGPoint(x: 200, y: 300)
+            let input = MouseScrollEventAdapter.input(event, applications: [12345: "test.scroll"])
+            var configuration = enabledMouse(smooth: false, reversed: true, speed: 2.2)
+            configuration.remoteCompatibility = true
+            var processor = MouseScrollProcessor(configuration: configuration, ownPID: 42)
+            #expect(processor.receive(input, at: 0) == .immediate)
+            var adapter = MouseScrollEventAdapter()
+            adapter.scale(event, input: input, multiplier: processor.configuration.multiplier)
+            #expect(abs(event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1)
+                        - (precise ? 0.8 : 1) * -2.2) < 0.001)
+            #expect(event.getIntegerValueField(.scrollWheelEventPointDeltaAxis1) == (precise ? -17 : -22))
+            #expect(event.getIntegerValueField(.eventSourceUserData) != MouseScrollEventAdapter.marker)
+            #expect(event.getIntegerValueField(.eventTargetUnixProcessID) == 12345)
+            #expect(event.flags == .maskShift && event.location == CGPoint(x: 200, y: 300))
+            #expect(!processor.hasPending)
+            // 系统转换可能将带上档键的离散纵向滚动改写为横向，原始字段须先核对。
+            let received = try #require(NSEvent(cgEvent: event))
+            #expect(received.hasPreciseScrollingDeltas == precise)
+        }
     }
 }
 

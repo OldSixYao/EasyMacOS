@@ -19,14 +19,16 @@ public enum FinderAction: String, Codable, CaseIterable, Sendable, Identifiable 
 
     public var id: String { rawValue }
 
-    public var title: String {
+    public var title: String { title(in: .simplifiedChinese) }
+
+    public func title(in language: AppLanguage) -> String {
         switch self {
-        case .newText: "新建文件"
-        case .copyPath: "复制完整路径"
-        case .copyName: "复制文件名"
-        case .openTerminal: "在此处打开终端"
-        case .cut: "剪切"
-        case .pasteMove: "粘贴（移动）"
+        case .newText: language.text("New File", "新建文件")
+        case .copyPath: language.text("Copy Full Path", "复制完整路径")
+        case .copyName: language.text("Copy File Name", "复制文件名")
+        case .openTerminal: language.text("Open Terminal Here", "在此处打开终端")
+        case .cut: language.text("Cut", "剪切")
+        case .pasteMove: language.text("Paste (Move)", "粘贴（移动）")
         }
     }
 
@@ -66,15 +68,19 @@ public enum FinderAction: String, Codable, CaseIterable, Sendable, Identifiable 
 public enum FinderMenuError: Error, LocalizedError, Equatable {
     case invalidRequest, invalidName, invalidFileType, missingDirectory, ambiguousDirectory, itemExists, unsupportedAction
 
-    public var errorDescription: String? {
+    public var errorDescription: String? { description(in: .simplifiedChinese) }
+
+    public func description(in language: AppLanguage) -> String {
         switch self {
-        case .invalidFileType: "请输入有效后缀：支持点分隔的复合后缀，不能包含路径分隔符、冒号、空白或控制字符，且名称不能过长。"
-        case .invalidRequest: "无法识别访达传来的操作，请重新打开右键菜单。"
-        case .invalidName: "名称不能为空、包含斜杠、冒号、换行，或使用「.」与「..」。"
-        case .missingDirectory: "目标目录已不存在，或当前没有可用的文件夹。"
-        case .ambiguousDirectory: "请选择一个文件夹，或同一目录中的文件后再执行此操作。"
-        case .itemExists: "同名项目已存在，请使用其他名称。"
-        case .unsupportedAction: "当前操作不支持创建项目。"
+        case .invalidFileType: language.text(
+            "Enter a valid file suffix. Dot-separated suffixes are supported; avoid separators, colons, whitespace, control characters and overly long names.",
+            "请输入有效后缀：支持点分隔的复合后缀，不能包含路径分隔符、冒号、空白或控制字符，且名称不能过长。")
+        case .invalidRequest: language.text("Reopen the context menu and try again.", "无法识别访达传来的操作，请重新打开右键菜单。")
+        case .invalidName: language.text("Enter a name without slashes, colons or newlines. The names . and .. are not allowed.", "名称不能为空、包含斜杠、冒号、换行，或使用「.」与「..」。")
+        case .missingDirectory: language.text("The destination folder is unavailable.", "目标目录已不存在，或当前没有可用的文件夹。")
+        case .ambiguousDirectory: language.text("Select a folder or files in the same folder.", "请选择一个文件夹，或同一目录中的文件后再执行此操作。")
+        case .itemExists: language.text("An item with this name already exists.", "同名项目已存在，请使用其他名称。")
+        case .unsupportedAction: language.text("This action cannot create an item.", "当前操作不支持创建项目。")
         }
     }
 }

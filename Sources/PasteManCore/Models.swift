@@ -21,6 +21,18 @@ public struct SourceApplication: Identifiable, Sendable, Equatable {
     public let name: String
 }
 
+public struct HistoryCursor: Sendable {
+    let favorite: Int
+    let timestamp: Double
+    let rowID: Int64
+    let id: UUID
+}
+
+public struct HistoryPage: Sendable {
+    public let entries: [HistoryEntry]
+    public let next: HistoryCursor?
+}
+
 public enum PreparedContent: Sendable {
     case text(String)
     case image(png: Data, thumbnail: Data)
@@ -60,11 +72,12 @@ public struct RetentionPolicy: Sendable {
 
 public enum StoreError: Error, LocalizedError, Sendable, Equatable {
     case database(String)
-    case storageFull, missingContent, invalidImage, imageTooLarge, unsupportedVersion
+    case storageFull, processingBusy, missingContent, invalidImage, imageTooLarge, unsupportedVersion
     public var errorDescription: String? {
         switch self {
         case .database(let message): "History database: \(message)"
         case .storageFull: "The storage budget is full. Remove some favorites or increase available space."
+        case .processingBusy: "Clipboard processing is busy. This copy was skipped; copy it again when processing finishes."
         case .missingContent: "This item is missing or damaged."
         case .invalidImage: "This image could not be decoded."
         case .imageTooLarge: "Image skipped: maximum 20 MiB and 40 million pixels."
@@ -74,6 +87,10 @@ public enum StoreError: Error, LocalizedError, Sendable, Equatable {
 }
 
 public protocol HistoryRepository: Sendable {
+    func retry() async throws
+    func nextCleanup(policy: RetentionPolicy, now: Date) async throws -> Date
+    func page(search: String, filter: HistoryFilter, source: String?, after: HistoryCursor?, limit: Int) async throws -> HistoryPage
+    func pruneIfNeeded(policy: RetentionPolicy, now: Date) async throws -> Bool
     func list(search: String, filter: HistoryFilter, source: String?) async throws -> [HistoryEntry]
     func sources() async throws -> [SourceApplication]
     func save(
@@ -85,6 +102,25 @@ public protocol HistoryRepository: Sendable {
     func prune(policy: RetentionPolicy, now: Date) async throws
     func content(for entry: HistoryEntry) async throws -> PreparedContent
     func imageData(for id: UUID, thumbnail: Bool) async throws -> Data
+}
+
+public extension HistoryRepository {
+    func retry() async throws {}
+    func nextCleanup(policy: RetentionPolicy, now: Date) async throws -> Date { now.addingTimeInterval(3600) }
+    func page(search: String, filter: HistoryFilter, source: String?, after: HistoryCursor?, limit: Int) async throws -> HistoryPage {
+        let all = try await list(search: search, filter: filter, source: source)
+        let start = after.flatMap { cursor in all.firstIndex(where: { $0.id == cursor.id }).map { $0 + 1 } } ?? 0
+        let rows = Array(all.dropFirst(start).prefix(max(1, limit)))
+        let next = start + rows.count < all.count ? rows.last.map {
+            HistoryCursor(favorite: $0.isFavorite ? 1 : 0, timestamp: $0.copiedAt.timeIntervalSince1970, rowID: 0, id: $0.id)
+        } : nil
+        return HistoryPage(entries: rows, next: next)
+    }
+    func pruneIfNeeded(policy: RetentionPolicy, now: Date) async throws -> Bool {
+        let before = try await list(search: "", filter: .all, source: nil).map(\.id)
+        try await prune(policy: policy, now: now)
+        return try await list(search: "", filter: .all, source: nil).map(\.id) != before
+    }
 }
 
 /// A count is consumed even when a copy is ignored, so paused/blocked contents are never replayed.

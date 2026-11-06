@@ -188,6 +188,8 @@ private struct ScreenshotHoverFeedback: ViewModifier {
     }
     private var drag: Drag?
     private var previewTask: Task<Void, Never>?
+    private var previewSession = UUID()
+    private var drawingSurface: ScreenshotDrawingSurface?
     private var revision = 0
     private var pointerTracking: NSTrackingArea?
     private(set) var cursorSample: ScreenshotCursorSample?
@@ -200,6 +202,15 @@ private struct ScreenshotHoverFeedback: ViewModifier {
         self.sampler = ScreenshotPixelSampler(image: capture.image)
         self.coordinator = coordinator
         super.init(frame: CGRect(origin: .zero, size: capture.screen.frame.size))
+        let background = ScreenshotFrozenBackground(frame: bounds, image: capture.image)
+        background.wantsLayer = true
+        background.autoresizingMask = [.width, .height]
+        addSubview(background)
+        let surface = ScreenshotDrawingSurface(frame: bounds)
+        surface.owner = self
+        surface.autoresizingMask = [.width, .height]
+        addSubview(surface)
+        drawingSurface = surface
         state.action = { [weak self] in self?.perform($0) }
         state.layoutChanged = { [weak self] in self?.showToolbar() }
         state.hoverChanged = { [weak self] title in self?.showHoverTip(title) }
@@ -247,14 +258,14 @@ private struct ScreenshotHoverFeedback: ViewModifier {
             hideCursorCard()
             return
         }
-        setNeedsDisplay(cursorCard.insetBy(dx: -2, dy: -2))
+        drawingSurface?.setNeedsDisplay(cursorCard.insetBy(dx: -2, dy: -2))
         cursorPoint = point
         cursorSample = sample
         cursorCard = ScreenshotGeometry.cursorCard(at: point, bounds: bounds)
-        setNeedsDisplay(cursorCard.insetBy(dx: -2, dy: -2))
+        drawingSurface?.setNeedsDisplay(cursorCard.insetBy(dx: -2, dy: -2))
     }
     private func hideCursorCard() {
-        if cursorSample != nil { setNeedsDisplay(cursorCard.insetBy(dx: -2, dy: -2)) }
+        if cursorSample != nil { drawingSurface?.setNeedsDisplay(cursorCard.insetBy(dx: -2, dy: -2)) }
         cursorPoint = nil
         cursorSample = nil
         cursorCard = .zero
@@ -307,9 +318,11 @@ private struct ScreenshotHoverFeedback: ViewModifier {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        // 父视图不重复绘制遮罩，所有交互绘制只由透明子层触发。
+    }
+    func drawInteraction(_ dirtyRect: NSRect) {
         guard let context = NSGraphicsContext.current?.cgContext else { return }
         defer { drawCursorCard(in: context) }
-        ScreenshotRenderer.drawImage(capture.image, in: bounds, context: context)
         context.setFillColor(NSColor.black.withAlphaComponent(0.42).cgColor)
         context.beginPath()
         context.addRect(bounds)
@@ -402,11 +415,13 @@ private struct ScreenshotHoverFeedback: ViewModifier {
             drag = .annotation
             hideCursorCard()
         }
-        needsDisplay = true
+        drawingSurface?.needsDisplay = true
     }
     override func mouseDragged(with event: NSEvent) {
         guard !state.busy, let drag else { return }
         let p = location(event)
+        let previousSelection = selection
+        let previousStroke = transient?.rect.offsetBy(dx: selection.minX, dy: selection.minY)
         updateCursor(at: p)
         switch drag {
         case .selection: selection = ScreenshotGeometry.rect(from: anchor, to: p)
@@ -428,12 +443,18 @@ private struct ScreenshotHoverFeedback: ViewModifier {
                 x: min(max(p.x - selection.minX, 0), selection.width),
                 y: min(max(p.y - selection.minY, 0), selection.height))
             if transient?.tool == .pen {
-                transient?.points.append(local)
+                if let last = transient?.points.last, hypot(last.x - local.x, last.y - local.y) >= 0.75 {
+                    transient?.points.append(local)
+                }
             } else if let first = transient?.points.first {
                 transient?.points = [first, local]
             }
         }
-        needsDisplay = true
+        let changed: CGRect
+        if case .annotation = drag {
+            changed = (previousStroke ?? .zero).union(transient?.rect.offsetBy(dx: selection.minX, dy: selection.minY) ?? .zero)
+        } else { changed = previousSelection.union(selection) }
+        drawingSurface?.setNeedsDisplay(changed.insetBy(dx: -32, dy: -32))
     }
     override func mouseUp(with event: NSEvent) {
         guard let drag else { return }
@@ -460,7 +481,7 @@ private struct ScreenshotHoverFeedback: ViewModifier {
         }
         hideCursorCard()
         showToolbar()
-        needsDisplay = true
+        drawingSurface?.needsDisplay = true
     }
     func showToolbar() {
         if toolbar == nil {
@@ -567,17 +588,17 @@ private struct ScreenshotHoverFeedback: ViewModifier {
         previewTask = Task { [weak self] in
             do {
                 let image = try await ScreenshotRenderWorker.shared.preview(
-                    base: base, pointSize: size, annotations: annotations)
+                    base: base, pointSize: size, annotations: annotations, session: self?.previewSession)
                 guard !Task.isCancelled, let self, self.revision == version else { return }
                 self.preview = image
-                self.needsDisplay = true
+                self.drawingSurface?.needsDisplay = true
             } catch {
                 guard !Task.isCancelled, let self, self.revision == version else { return }
                 self.state.error = error.localizedDescription
                 self.showToolbar()
             }
         }
-        needsDisplay = true
+        drawingSurface?.needsDisplay = true
     }
     private func perform(_ action: ScreenshotEditorAction) {
         guard !state.busy else { return }
@@ -597,7 +618,7 @@ private struct ScreenshotHoverFeedback: ViewModifier {
         case .pin: coordinator?.finish(.pin, from: self)
         case .cancel: coordinator?.cancel()
         }
-        needsDisplay = true
+        drawingSurface?.needsDisplay = true
         if selectedImage != nil { showToolbar() }
     }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
@@ -630,7 +651,7 @@ private struct ScreenshotHoverFeedback: ViewModifier {
         state.shapesExpanded = false
         state.error = nil
         state.busy = false
-        needsDisplay = true
+        drawingSurface?.needsDisplay = true
     }
     func dispose() {
         showHoverTip(nil)
@@ -638,9 +659,39 @@ private struct ScreenshotHoverFeedback: ViewModifier {
         hideCursorCard()
         previewTask?.cancel()
         previewTask = nil
+        let session = previewSession
+        previewSession = UUID()
+        Task { await ScreenshotRenderWorker.shared.releasePreview(session: session) }
         textEditor?.removeFromSuperview()
         textEditor = nil
         toolbar?.removeFromSuperview()
         toolbar = nil
     }
+    func releaseDisplayResources() {
+        // 窗口退场前清空图层，避免整屏纹理在合成器事务中继续滞留。
+        for child in subviews {
+            (child as? ScreenshotFrozenBackground)?.image = nil
+            child.layer?.contents = nil
+            child.layer?.removeAllAnimations()
+        }
+    }
+}
+
+// 静态背景由合成器复用，透明交互层只重绘失效区域；两层均不截获鼠标。
+@MainActor private final class ScreenshotFrozenBackground: NSView {
+    var image: CGImage?
+    init(frame: CGRect, image: CGImage) { self.image = image; super.init(frame: frame) }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override var isFlipped: Bool { true }
+    override func draw(_ dirtyRect: NSRect) {
+        guard let image, let context = NSGraphicsContext.current?.cgContext else { return }
+        ScreenshotRenderer.drawImage(image, in: bounds, context: context)
+    }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+@MainActor private final class ScreenshotDrawingSurface: NSView {
+    weak var owner: ScreenshotOverlay?
+    override var isFlipped: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override func draw(_ dirtyRect: NSRect) { owner?.drawInteraction(dirtyRect) }
 }

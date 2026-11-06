@@ -25,6 +25,7 @@ struct HistoryView: View {
                         Image(systemName: "info.circle").foregroundStyle(.orange)
                         Text(message).font(.caption).fixedSize(horizontal: false, vertical: true)
                         Spacer(minLength: 0)
+                        Button(L.t("Retry", "重试")) { model.retryHistory() }.buttonStyle(.plain)
                         Button {
                             model.message = nil
                             model.recordingIssue = nil
@@ -123,6 +124,7 @@ struct HistoryView: View {
                 LazyVStack(spacing: 4) {
                     ForEach(model.entries) { entry in
                         HistoryRow(entry: entry, model: model).id(entry.id)
+                            .onAppear { if entry.id == model.entries.last?.id { model.loadMore() } }
                     }
                 }.padding(.horizontal, 8).padding(.vertical, 6)
             }
@@ -155,8 +157,8 @@ struct HistoryView: View {
         VStack(spacing: 0) {
             Divider()
             HStack(spacing: 12) {
-                Text("\(model.entries.count) " + L.t("items", "条记录")).font(.caption).foregroundStyle(.tertiary)
-                if model.loading { ProgressView().controlSize(.mini) }
+                Text("\(model.entries.count)" + (model.hasMore ? "+ " : " ") + L.t("items", "条记录")).font(.caption).foregroundStyle(.tertiary)
+                if model.loading || model.loadingMore { ProgressView().controlSize(.mini) }
                 Spacer()
                 Text(L.t("↑↓ select   ↩ paste", "↑↓ 选择   ↩ 粘贴")).font(.system(size: 10)).foregroundStyle(.tertiary)
                 Button {

@@ -25,22 +25,25 @@ public struct FinderConfiguration: Codable, Equatable, Sendable {
     public static let maximumFileTypeID = (Int(Int32.max) - 1025) / 2
     public var disabledActions: Set<String>
     public var enabled: Bool
+    public var language: AppLanguage?
     public private(set) var fileTypes: [FinderFileType]
     public private(set) var nextFileTypeID: Int
 
     public init(disabledActions: Set<String> = [], enabled: Bool = true) {
         self.disabledActions = disabledActions
         self.enabled = enabled
+        language = nil
         fileTypes = Self.defaultSuffixes.enumerated().map { FinderFileType(id: $0.offset + 1, suffix: $0.element) }
         nextFileTypeID = fileTypes.count + 1
     }
 
-    private enum CodingKeys: String, CodingKey { case disabledActions, enabled, fileTypes, nextFileTypeID }
+    private enum CodingKeys: String, CodingKey { case disabledActions, enabled, fileTypes, nextFileTypeID, language }
 
     public init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         self.init(disabledActions: try values.decode(Set<String>.self, forKey: .disabledActions),
                   enabled: try values.decode(Bool.self, forKey: .enabled))
+        language = try values.decodeIfPresent(AppLanguage.self, forKey: .language)
         if values.contains(.fileTypes) {
             fileTypes = try values.decode([FinderFileType].self, forKey: .fileTypes)
             nextFileTypeID = try values.decode(Int.self, forKey: .nextFileTypeID)

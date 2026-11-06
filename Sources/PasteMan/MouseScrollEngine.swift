@@ -1,5 +1,22 @@
 import Foundation
 
+/// 活跃输入期间短暂复用权限结果；闲置时没有轮询，恢复接管时必须强制复核。
+struct MouseScrollPermissionGate {
+    private var checkedAt: TimeInterval?
+    private var allowed = false
+    private let lifetime: TimeInterval = 0.1
+
+    mutating func allows(at time: TimeInterval, force: Bool = false, check: () -> Bool) -> Bool {
+        guard time.isFinite else { return false }
+        let expired = checkedAt.map { time < $0 || time - $0 >= lifetime } ?? true
+        if force || expired {
+            allowed = check()
+            checkedAt = time
+        }
+        return allowed
+    }
+}
+
 struct MouseScrollConfiguration: Codable, Equatable, Sendable {
     var enabled = false
     var smooth = true
@@ -126,6 +143,7 @@ private struct SmoothAxis {
     private var target = 0.0
     private var startedAt = 0.0
     private var fraction = 0.0
+    private var distance = 0.0
     var hasPending: Bool { position != target }
 
     mutating func add(_ delta: Double, at time: TimeInterval) {
@@ -136,12 +154,16 @@ private struct SmoothAxis {
         }
         start = position
         target += delta
+        distance = abs(target - start)
         startedAt = time
     }
 
     mutating func sample(at time: TimeInterval, duration: TimeInterval) -> Double {
         guard hasPending, time.isFinite else { return 0 }
-        let progress = min(1, max(0, (time - startedAt) / duration))
+        // 小位移按距离缩短响应时间，所有应用始终输出同一种平滑像素事件。
+        // 使用连续曲线避免在某个输入阈值突然切换为原生步进，时长不超过用户设置。
+        let response = max(1 / 60.0, duration * min(1, sqrt(distance / 80)))
+        let progress = min(1, max(0, (time - startedAt) / response))
         let next = progress == 1 ? target : start + (target - start) * (1 - pow(1 - progress, 3))
         let value = next - position + fraction
         let pixels = value.rounded(.towardZero)

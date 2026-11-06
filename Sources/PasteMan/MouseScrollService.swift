@@ -281,6 +281,7 @@ private final class MouseScrollWorker: @unchecked Sendable {
     private var processor: MouseScrollProcessor
     private var applications: [Int32: String]
     private var adapter = MouseScrollEventAdapter()
+    private var permissionGate = MouseScrollPermissionGate()
     private var tap: CFMachPort?
     private var timer: CFRunLoopTimer?
     private var template: CGEvent?
@@ -356,7 +357,9 @@ private final class MouseScrollWorker: @unchecked Sendable {
                 tap = nil
                 control.withLock { $0.loop = nil }
             }
-            guard AXIsProcessTrusted(), CGPreflightPostEventAccess() else {
+            guard permissionGate.allows(at: ProcessInfo.processInfo.systemUptime, force: true, check: {
+                AXIsProcessTrusted() && CGPreflightPostEventAccess()
+            }) else {
                 report(.permissionRequired)
                 return
             }
@@ -410,7 +413,9 @@ private final class MouseScrollWorker: @unchecked Sendable {
             let now = ProcessInfo.processInfo.systemUptime
             timeoutCount = now - lastTimeout < 1 ? timeoutCount + 1 : 1
             lastTimeout = now
-            if timeoutCount < 3, AXIsProcessTrusted(), CGPreflightPostEventAccess(), let tap {
+            if timeoutCount < 3, permissionGate.allows(at: now, force: true, check: {
+                AXIsProcessTrusted() && CGPreflightPostEventAccess()
+            }), let tap {
                 CGEvent.tapEnable(tap: tap, enable: true)
                 if !CGEvent.tapIsEnabled(tap: tap) { fail() }
             } else { fail() }
@@ -421,12 +426,16 @@ private final class MouseScrollWorker: @unchecked Sendable {
             return Unmanaged.passUnretained(event)
         }
         guard type == .scrollWheel else { return Unmanaged.passUnretained(event) }
-        let input = MouseScrollEventAdapter.input(event, applications: applications)
-        if input.generated { return Unmanaged.passUnretained(event) }
-        guard AXIsProcessTrusted(), CGPreflightPostEventAccess() else {
+        // 自生成事件不需要读取其余滚轮字段，也不能清除尚未结束的动画。
+        if event.getIntegerValueField(.eventSourceUserData) == MouseScrollEventAdapter.marker {
+            return Unmanaged.passUnretained(event)
+        }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard permissionGate.allows(at: now, check: { AXIsProcessTrusted() && CGPreflightPostEventAccess() }) else {
             fail()
             return Unmanaged.passUnretained(event)
         }
+        let input = MouseScrollEventAdapter.input(event, applications: applications)
         switch processor.receive(input, at: ProcessInfo.processInfo.systemUptime) {
         case .passThrough:
             cancel()
@@ -456,7 +465,8 @@ private final class MouseScrollWorker: @unchecked Sendable {
             cancel()
             return
         }
-        guard AXIsProcessTrusted(), CGPreflightPostEventAccess() else {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard permissionGate.allows(at: now, check: { AXIsProcessTrusted() && CGPreflightPostEventAccess() }) else {
             fail()
             return
         }

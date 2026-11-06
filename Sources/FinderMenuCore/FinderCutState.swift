@@ -3,15 +3,17 @@ import Foundation
 public enum FinderMoveError: Error, LocalizedError, Equatable {
     case expiredCut, missingSource, sameDirectory, recursiveDestination, permissionRequired, unsafeFinder, clipboardUnavailable
 
-    public var errorDescription: String? {
+    public var errorDescription: String? { description(in: .simplifiedChinese) }
+
+    public func description(in language: AppLanguage) -> String {
         switch self {
-        case .expiredCut: "剪切记录已失效或已使用，请重新剪切后再粘贴（移动）。"
-        case .missingSource: "部分源文件已不存在，请重新选择并剪切；本次未移动任何项目。"
-        case .sameDirectory: "目标就是源文件所在目录，无需移动。"
-        case .recursiveDestination: "不能将文件夹移动到自身或其子目录。"
-        case .permissionRequired: "粘贴（移动）需要辅助功能权限，请在访达设置中开启；源文件尚未改变。"
-        case .unsafeFinder: "未能确认访达目标目录，或当前正在编辑名称、显示对话框；请关闭对话框后重试。"
-        case .clipboardUnavailable: "无法写入或读取文件剪贴板，请检查剪贴板访问权限后重试。"
+        case .expiredCut: language.text("The cut selection has expired or was used. Cut the files again.", "剪切记录已失效或已使用，请重新剪切后再粘贴（移动）。")
+        case .missingSource: language.text("Some source files are missing. No items were moved.", "部分源文件已不存在，请重新选择并剪切；本次未移动任何项目。")
+        case .sameDirectory: language.text("The files are already in the destination folder.", "目标就是源文件所在目录，无需移动。")
+        case .recursiveDestination: language.text("A folder cannot be moved into itself or a subfolder.", "不能将文件夹移动到自身或其子目录。")
+        case .permissionRequired: language.text("Enable Accessibility in Permissions to move files. The source files are unchanged.", "粘贴（移动）需要辅助功能权限，请在权限设置中开启；源文件尚未改变。")
+        case .unsafeFinder: language.text("Could not confirm the Finder destination. Finish renaming or close dialogs and try again.", "未能确认访达目标目录，或当前正在编辑名称、显示对话框；请关闭对话框后重试。")
+        case .clipboardUnavailable: language.text("Could not access the file clipboard. Check clipboard permissions and try again.", "无法写入或读取文件剪贴板，请检查剪贴板访问权限后重试。")
         }
     }
 }

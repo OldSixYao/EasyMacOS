@@ -101,3 +101,21 @@ extension FinderModelTests {
         #expect(model.message != nil)
     }
 }
+
+
+extension FinderModelTests {
+    @Test func languagePersistsAlongsideMenuConfiguration() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("FinderLanguage-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = FinderConfigurationStore(url: root.appendingPathComponent("menu.json"))
+        let model = FinderModel(store: store)
+        model.setLanguage(.english)
+        model.set(.copyName, enabled: false)
+        #expect(try store.load().language == .english)
+        #expect(!model.configuration.contains(.copyName))
+        model.restoreDefaults()
+        #expect(model.configuration.language == .english)
+        model.setLanguage(.simplifiedChinese)
+        #expect(try store.load().language == .simplifiedChinese)
+    }
+}

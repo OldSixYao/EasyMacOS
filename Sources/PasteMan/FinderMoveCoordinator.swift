@@ -38,24 +38,24 @@ struct FinderMoveSnapshot {
     var environment: FinderMoveEnvironment = .live()
 
     func move(token: UUID, to directory: URL, clipboard: FinderCutClipboard) async throws {
-        let (state, files) = try clipboard.current(token: token)
-        try FinderMoveValidation.destination(directory, for: files)
+        let (state, files) = try clipboard.current(token: token, validateFiles: false)
+        try await FinderFileWorker.shared.validateDestination(directory, items: files)
         try await dispatch(
             to: directory,
             validate: {
-                let (_, currentFiles) = try clipboard.current(token: token)
+                let (_, currentFiles) = try clipboard.current(token: token, validateFiles: false)
                 guard currentFiles == files else { throw FinderMoveError.expiredCut }
-                try FinderMoveValidation.destination(directory, for: currentFiles)
             },
-            consume: { try clipboard.consume(state) }, restore: { try clipboard.restore(state) },
+            validateFiles: { try await FinderFileWorker.shared.validateDestination(directory, items: files) },
+            consume: { try clipboard.consume(state, validateFiles: false) }, restore: { try clipboard.restore(state) },
             validateConsumed: {
-                guard try clipboard.files(matching: state) == files else { throw FinderMoveError.expiredCut }
+                guard try clipboard.files(matching: state, validateFiles: false) == files else { throw FinderMoveError.expiredCut }
             })
     }
 
     // 请求队列等待到命令提交结束。文件移动、冲突及撤销始终由访达负责。
     func dispatch(
-        to directory: URL, validate: () throws -> Void, consume: () throws -> Void,
+        to directory: URL, validate: () throws -> Void, validateFiles: () async throws -> Void = {}, consume: () throws -> Void,
         restore: () throws -> Void, validateConsumed: () throws -> Void
     ) async throws {
         guard environment.trusted() else { throw FinderMoveError.permissionRequired }
@@ -84,6 +84,7 @@ struct FinderMoveSnapshot {
                 continue
             }
             if state.matches(directory) {
+                try await validateFiles()
                 try validate()
                 guard environment.trusted(), environment.snapshot().matches(directory), environment.now() < deadline else {
                     throw FinderMoveError.unsafeFinder

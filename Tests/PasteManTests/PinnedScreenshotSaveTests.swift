@@ -4,6 +4,15 @@ import Testing
 @testable import PasteMan
 
 @Suite("钉图保存生命周期", .serialized) @MainActor struct PinnedScreenshotSaveTests {
+    private func waitUntil(_ condition: () -> Bool) async throws {
+        // 图片准备在独立队列执行；固定次数 Task.yield 不能保证该队列已完成。
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while !condition(), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        try #require(condition())
+    }
+
     private func image() throws -> ScreenshotImage {
         let context = try #require(CGContext(
             data: nil, width: 40, height: 30, bitsPerComponent: 8, bytesPerRow: 0,
@@ -25,25 +34,28 @@ import Testing
     @Test func repeatedSaveWhilePendingStartsOnlyOneOperationThenAllowsRetry() async throws {
         _ = NSApplication.shared
         var calls = 0
+        var completions = 0
         var continuation: CheckedContinuation<Bool, any Error>?
         let pins = PinnedScreenshotManager(presentWindow: { _ in }, saveImage: { _ in
             calls += 1
-            return try await withCheckedThrowingContinuation { continuation = $0 }
+            let result: Bool = try await withCheckedThrowingContinuation { continuation = $0 }
+            completions += 1
+            return result
         })
         defer { pins.closeAll() }
         pins.show(try image(), sourceID: "test", sourceName: "测试", origin: .zero)
         let window = try #require(pins.windows.first)
         try save(window)
         try save(window)
-        for _ in 0..<100 where calls == 0 { await Task.yield() }
+        try await waitUntil { calls == 1 }
         #expect(calls == 1)
         continuation?.resume(returning: false)
-        for _ in 0..<100 { await Task.yield() }
+        try await waitUntil { completions == 1 }
         try save(window)
-        for _ in 0..<100 where calls < 2 { await Task.yield() }
+        try await waitUntil { calls == 2 }
         #expect(calls == 2)
         continuation?.resume(returning: true)
-        for _ in 0..<100 { await Task.yield() }
+        try await waitUntil { completions == 2 }
     }
 
     @Test(arguments: [false, true]) func closingCancelsSaveReleasesViewAndSuppressesLateError(_ closeAll: Bool) async throws {
@@ -63,17 +75,17 @@ import Testing
         }, reportError: { errors.append($0) })
         pins.show(try image(), sourceID: "test", sourceName: "测试", origin: .zero)
         let window = try #require(pins.windows.first)
-        weak var view = window.contentView
+        weak let view = window.contentView
         try save(window)
-        for _ in 0..<100 where continuation == nil { await Task.yield() }
+        try await waitUntil { continuation != nil }
         try #require(continuation != nil)
         if closeAll { pins.closeAll() } else { window.close() }
         #expect(pins.count == 0)
         #expect(window.contentView == nil)
-        for _ in 0..<100 where view != nil { await Task.yield() }
+        try await waitUntil { view == nil }
         #expect(view == nil)
         continuation?.resume(throwing: CocoaError(.fileWriteNoPermission))
-        for _ in 0..<100 where !cancelled { await Task.yield() }
+        try await waitUntil { cancelled }
         #expect(cancelled)
         #expect(errors.isEmpty)
     }
@@ -90,10 +102,10 @@ import Testing
         pins.show(try image(), sourceID: "test", sourceName: "测试", origin: .zero)
         let window = try #require(pins.windows.first)
         try save(window)
-        for _ in 0..<100 where errors.isEmpty { await Task.yield() }
+        try await waitUntil { errors.count == 1 }
         #expect(errors.count == 1)
         try save(window)
-        for _ in 0..<100 where calls < 2 { await Task.yield() }
+        try await waitUntil { errors.count == 2 }
         #expect(calls == 2)
         #expect(errors.count == 2)
     }

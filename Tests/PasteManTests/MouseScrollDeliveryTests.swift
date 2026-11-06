@@ -98,19 +98,19 @@ private final class MouseEventTemplateCapture: @unchecked Sendable {
                 let values = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
             return values
         }
-        func post(precise: Bool = false, phase: Int64 = 0, direct: Bool = false) throws {
+        func post(amount: Int32 = 8, precise: Bool = false, phase: Int64 = 0, direct: Bool = false) throws {
             let event: CGEvent
             if direct {
                 // 进程直接投递不负责窗口路由，沿用合成窗口已收到的事件元数据。
                 let template = try #require(capture.template)
-                event = try #require(MouseScrollEventAdapter.output(MouseScrollVector(y: 8), template: template))
+                event = try #require(MouseScrollEventAdapter.output(MouseScrollVector(y: Double(amount)), template: template))
                 let source = try #require(CGEventSource(stateID: .privateState))
                 source.userData = 0
                 event.setSource(source)
                 event.setIntegerValueField(.eventSourceUserData, value: 0)
             } else {
                 event = try #require(CGEvent(scrollWheelEvent2Source: nil, units: precise ? .pixel : .line,
-                                             wheelCount: 2, wheel1: 8, wheel2: 0, wheel3: 0))
+                                             wheelCount: 2, wheel1: amount, wheel2: 0, wheel3: 0))
                 event.location = point
             }
             event.flags = []
@@ -127,7 +127,19 @@ private final class MouseEventTemplateCapture: @unchecked Sendable {
         let distance = smoothed.reduce(0.0) { $0 + (($1["y"] as? NSNumber)?.doubleValue ?? 0) }
         #expect(abs(distance - 80) <= 1)
 
-        let count = smoothed.count
+        for amount: Int32 in [1, -1] {
+            let beforeSmall = events().count
+            try post(amount: amount)
+            try await Task.sleep(for: .milliseconds(250))
+            let small = Array(events().dropFirst(beforeSmall))
+            #expect(small.count > 1)
+            #expect(small.allSatisfy { ($0["precise"] as? Bool) == true })
+            let distance = small.reduce(0.0) { $0 + (($1["y"] as? NSNumber)?.doubleValue ?? 0) }
+            #expect(abs(distance - Double(amount) * 10) < 1)
+            #expect(small.allSatisfy { ($0["marker"] as? NSNumber)?.int64Value == MouseScrollEventAdapter.marker })
+        }
+
+        let count = events().count
         try post(precise: true)
         try await Task.sleep(for: .milliseconds(250))
         let native = Array(events().dropFirst(count))
@@ -140,13 +152,25 @@ private final class MouseEventTemplateCapture: @unchecked Sendable {
         driver.update(configuration: configuration, applications: apps)
         try await Task.sleep(for: .milliseconds(50))
         let beforeRemote = events().count
-        try post(precise: true, direct: true)
+        try post(amount: 24, precise: true, direct: true)
         try await Task.sleep(for: .milliseconds(350))
         let remote = Array(events().dropFirst(beforeRemote))
         #expect(remote.count > 1)
         #expect(remote.allSatisfy { ($0["marker"] as? NSNumber)?.int64Value == MouseScrollEventAdapter.marker })
         let remoteDistance = remote.reduce(0.0) { $0 + (($1["y"] as? NSNumber)?.doubleValue ?? 0) }
-        #expect(abs(remoteDistance + 17.6) < 1)
+        #expect(abs(remoteDistance + 52.8) < 1)
+
+        for amount: Int32 in [8, -8] {
+            let beforeSmallRemote = events().count
+            try post(amount: amount, precise: true, direct: true)
+            try await Task.sleep(for: .milliseconds(250))
+            let smallRemote = Array(events().dropFirst(beforeSmallRemote))
+            #expect(smallRemote.count > 1)
+            #expect(smallRemote.allSatisfy { ($0["precise"] as? Bool) == true })
+            let distance = smallRemote.reduce(0.0) { $0 + (($1["y"] as? NSNumber)?.doubleValue ?? 0) }
+            #expect(abs(distance + Double(amount) * 2.2) < 1)
+            #expect(smallRemote.allSatisfy { ($0["marker"] as? NSNumber)?.int64Value == MouseScrollEventAdapter.marker })
+        }
 
         let beforeGesture = events().count
         try post(precise: true, phase: 4)

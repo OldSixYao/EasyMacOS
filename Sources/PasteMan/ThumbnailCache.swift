@@ -16,6 +16,7 @@ import AppKit
     private let byteLimit: Int
     private var values: [Key: Value] = [:]
     private var bytes = 0
+    var byteCount: Int { bytes }
     private var access: UInt64 = 0
     private(set) var generation = 0
     private var pressureSource: DispatchSourceMemoryPressure?

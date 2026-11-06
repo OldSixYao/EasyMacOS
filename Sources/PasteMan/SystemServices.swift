@@ -34,6 +34,8 @@ enum ClipboardSnapshot: Sendable {
         Set((pasteboard.pasteboardItems ?? []).flatMap { $0.types.map(\.rawValue) })
     }
     func capture() -> ClipboardSnapshot? {
+        let interval = PerformanceTrace.signposter.beginInterval("ClipboardRead", id: PerformanceTrace.signposter.makeSignpostID())
+        defer { PerformanceTrace.signposter.endInterval("ClipboardRead", interval) }
         for item in pasteboard.pasteboardItems ?? [] {
             // A Finder file copy may expose text or promised thumbnails. Do not record either.
             if item.types.contains(.fileURL)
@@ -203,6 +205,10 @@ enum HotKeyAction: UInt32, CaseIterable {
             completion(Shortcut(keyCode: UInt32(event.keyCode), modifiers: modifiers, keyLabel: label.uppercased()))
             return nil
         }
+    }
+    func unregister(for action: HotKeyAction) {
+        if let ref = hotKeys.removeValue(forKey: action) { UnregisterEventHotKey(ref) }
+        current.removeValue(forKey: action)
     }
     func cancelRecording() {
         if let recorder { NSEvent.removeMonitor(recorder) }

@@ -1,4 +1,5 @@
 import AppKit
+import FinderMenuCore
 import PasteManCore
 import ServiceManagement
 import SwiftUI
@@ -100,6 +101,8 @@ struct SettingsView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .onChange(of: model.settings.retentionDays) { model.applyRetention() }
         .onChange(of: model.settings.historyLimit) { model.applyRetention() }
+        .onChange(of: model.settings.screenshotEnabled) { cancelRecording(); shortcutError = nil }
+        .onChange(of: model.settings.clipboardEnabled) { cancelRecording(); shortcutError = nil }
         .onChange(of: focusedTab) { previous, current in
             guard let current else { return }
             if previous == nil {
@@ -132,6 +135,14 @@ struct SettingsView: View {
     private var generalSettings: some View {
         Form {
             Section {
+                Picker(L.t("Interface language", "界面语言"), selection: Binding(
+                    get: { L.language },
+                    set: { InterfaceLocalization.shared.setLanguage($0) }
+                )) {
+                    ForEach(AppLanguage.allCases) { language in
+                        Text(language.name).tag(language)
+                    }
+                }
                 Toggle(L.t("Launch at login", "开机启动"), isOn: Binding(
                     get: { model.permissions.loginStatus == .enabled },
                     set: { enabled in
@@ -145,19 +156,29 @@ struct SettingsView: View {
                 }
             }
             Section {
-                LabeledContent(L.t("Version", "版本"), value: AppVersion.current.display)
+                LabeledContent(L.t("Version", "版本")) {
+                    Text(AppVersion.current.display)
+                    Button(L.t("Check for Updates…", "检查更新…")) { model.updates.checkForUpdates() }
+                        .disabled(!model.updates.canCheckForUpdates)
+                        .accessibilityIdentifier("update.check")
+                }
             }
         }.formStyle(.grouped)
     }
 
     private var screenshotSettings: some View {
-        Form {
+        @Bindable var settings = model.settings
+        return Form {
+            Section {
+                Toggle(L.t("Enable screenshots", "启用截图"), isOn: $settings.screenshotEnabled)
+            }
             Section {
                 shortcutRow(for: .screenshot)
-                shortcutFeedback
+                shortcutFeedback(for: .screenshot)
             } header: {
                 Text(L.t("Capture", "截图"))
             }
+            .disabled(!settings.screenshotEnabled)
         }.formStyle(.grouped)
     }
 
@@ -165,11 +186,15 @@ struct SettingsView: View {
         @Bindable var settings = model.settings
         return Form {
             Section {
+                Toggle(L.t("Enable clipboard", "启用剪贴板"), isOn: $settings.clipboardEnabled)
+            }
+            Section {
                 shortcutRow(for: .history)
-                shortcutFeedback
+                shortcutFeedback(for: .history)
             } header: {
                 Text(L.t("History panel", "历史面板"))
             }
+            .disabled(!settings.clipboardEnabled)
             Section {
                 Picker(L.t("Keep history", "保留时间"), selection: $settings.retentionDays) {
                     ForEach([1, 7, 14, 30, 90, 365], id: \.self) {
@@ -183,6 +208,7 @@ struct SettingsView: View {
             } header: {
                 Text(L.t("History", "历史记录"))
             }
+            .disabled(!settings.clipboardEnabled)
             Section {
                 if !settings.excludedApps.isEmpty {
                     ScrollView {
@@ -220,6 +246,7 @@ struct SettingsView: View {
             } header: {
                 Text(L.t("Excluded applications", "不记录这些应用"))
             }
+            .disabled(!settings.clipboardEnabled)
         }.formStyle(.grouped)
     }
 
@@ -251,8 +278,10 @@ struct SettingsView: View {
         }
     }
 
-    @ViewBuilder private var shortcutFeedback: some View {
-        if let shortcutError { Text(shortcutError).font(.caption).foregroundStyle(.orange) }
+    @ViewBuilder private func shortcutFeedback(for action: HotKeyAction) -> some View {
+        if let issue = shortcutError ?? model.shortcutIssues[action] {
+            Text(issue).font(.caption).foregroundStyle(.orange)
+        }
     }
 
     private var permissionSettings: some View {

@@ -33,6 +33,10 @@ mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
 cp "$binary_dir/EasyMacOS" "$app_path/Contents/MacOS/EasyMacOS"
 cp scripts/Info.plist "$app_path/Contents/Info.plist"
 cp -R Resources/en.lproj Resources/zh-Hans.lproj "$app_path/Contents/Resources/"
+framework_path="$app_path/Contents/Frameworks/Sparkle.framework"
+mkdir -p "$app_path/Contents/Frameworks"
+ditto "$binary_dir/Sparkle.framework" "$framework_path"
+cp .build/checkouts/Sparkle/LICENSE "$app_path/Contents/Resources/Sparkle-LICENSE.txt"
 if [ -n "${BUNDLE_ID:-}" ]; then /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$app_path/Contents/Info.plist"; fi
 if [ -n "${VERSION:-}" ]; then /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$app_path/Contents/Info.plist"; fi
 swift scripts/make-icon.swift "$PWD/dist/AppIcon.iconset"
@@ -49,6 +53,15 @@ host_identifier="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app_
 /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $project_build" "$extension_path/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${host_identifier}.FinderExtension" "$extension_path/Contents/Info.plist"
 # 固定证书使指定要求基于签名身份，而非随构建变化的内容哈希。
+sparkle_signing_flags=(--force --timestamp=none --sign "$signing_identity")
+if [ -n "${DEVELOPER_ID_APPLICATION:-}" ]; then
+    sparkle_signing_flags=(--force --options runtime --timestamp --sign "$signing_identity")
+fi
+codesign "${sparkle_signing_flags[@]}" "$framework_path/Versions/B/XPCServices/Installer.xpc"
+codesign "${sparkle_signing_flags[@]}" --preserve-metadata=entitlements "$framework_path/Versions/B/XPCServices/Downloader.xpc"
+codesign "${sparkle_signing_flags[@]}" "$framework_path/Versions/B/Autoupdate"
+codesign "${sparkle_signing_flags[@]}" "$framework_path/Versions/B/Updater.app"
+codesign "${sparkle_signing_flags[@]}" "$framework_path"
 codesign --force --timestamp=none --sign "$signing_identity" --entitlements Resources/FinderExtension.entitlements "$extension_path"
 codesign --force --timestamp=none --sign "$signing_identity" "$app_path"
 codesign --verify --deep --strict "$app_path"

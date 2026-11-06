@@ -14,6 +14,8 @@ xcrun notarytool submit "$PWD/dist/EasyMacOS-notarization.zip" --keychain-profil
 xcrun stapler staple "$app_path"
 xcrun stapler validate "$app_path"
 spctl --assess --type execute --verbose=2 "$app_path"
+# 必须在公证票据附加完毕后压缩和签名，之后不再修改更新包。
+./scripts/package-update.sh "$app_path"
 ./scripts/dmg.sh "$app_path"
 codesign --force --timestamp --sign "$DEVELOPER_ID_APPLICATION" "$PWD/dist/EasyMacOS.dmg"
 xcrun notarytool submit "$PWD/dist/EasyMacOS.dmg" --keychain-profile "$NOTARY_PROFILE" --wait

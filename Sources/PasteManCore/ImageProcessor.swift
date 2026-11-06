@@ -8,6 +8,7 @@ public enum ImageProcessor {
     public static let maximumPixels = 40_000_000
 
     public static func prepare(_ data: Data) throws -> PreparedContent {
+        try Task.checkCancellation()
         guard data.count <= maximumInputBytes else { throw StoreError.imageTooLarge }
         guard
             let source = CGImageSourceCreateWithData(
@@ -35,7 +36,26 @@ public enum ImageProcessor {
         return .image(png: try encode(image), thumbnail: try encode(thumb))
     }
 
+    /// 仅供应用自身渲染、已经去除元数据的截图使用；不接收外部剪贴板位图。
+    public static func prepareRenderedImage(_ image: CGImage, png: Data) throws -> PreparedContent {
+        try Task.checkCancellation()
+        guard png.count <= maximumInputBytes, image.height > 0, image.width <= maximumPixels / image.height else {
+            throw StoreError.imageTooLarge
+        }
+        let ratio = min(1, 240 / Double(max(image.width, image.height)))
+        let width = max(1, Int(Double(image.width) * ratio))
+        let height = max(1, Int(Double(image.height) * ratio))
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { throw StoreError.invalidImage }
+        context.interpolationQuality = .high
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard let thumbnail = context.makeImage() else { throw StoreError.invalidImage }
+        return .image(png: png, thumbnail: try encode(thumbnail))
+    }
+
     private static func encode(_ image: CGImage) throws -> Data {
+        try Task.checkCancellation()
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else {
             throw StoreError.invalidImage

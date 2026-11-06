@@ -1,5 +1,6 @@
 import AppKit
 import ScreenCaptureKit
+import PasteManCore
 
 struct ScreenshotScreen: Sendable {
     let id: CGDirectDisplayID
@@ -17,6 +18,8 @@ struct CapturedScreen: Sendable {
 
 @MainActor struct SystemScreenCapture: ScreenCapturing {
     func capture(_ screens: [ScreenshotScreen]) async throws -> [CapturedScreen] {
+        let interval = PerformanceTrace.signposter.beginInterval("SystemScreenCapture", id: PerformanceTrace.signposter.makeSignpostID())
+        defer { PerformanceTrace.signposter.endInterval("SystemScreenCapture", interval) }
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         let ownApps = content.applications.filter { $0.processID == ProcessInfo.processInfo.processIdentifier }
         var result: [CapturedScreen] = []
@@ -69,6 +72,9 @@ struct CapturedScreen: Sendable {
     var onError: ((String) -> Void)?
     var onCopyColor: ((String) -> Bool)?
     var isActive: Bool { phase != .idle }
+    var isEnabled = true {
+        didSet { if !isEnabled { cancel() } }
+    }
 
     init(
         captureService: any ScreenCapturing = SystemScreenCapture(),
@@ -84,7 +90,7 @@ struct CapturedScreen: Sendable {
     }
 
     func start(screens: [ScreenshotScreen], sourceID: String, sourceName: String) {
-        guard !isActive else { return }
+        guard isEnabled, !isActive else { return }
         phase = .capturing
         generation += 1
         let version = generation
@@ -126,6 +132,8 @@ struct CapturedScreen: Sendable {
             let panel = ScreenshotPanel(
                 contentRect: capture.screen.frame, styleMask: [.borderless, .nonactivatingPanel],
                 backing: .buffered, defer: false)
+            // 全屏冻结画面必须原位出现，系统缩放动画会让整个桌面看起来抖动。
+            panel.animationBehavior = .none
             panel.onCancel = { [weak self] in self?.cancel() }
             panel.isReleasedWhenClosed = false
             panel.hidesOnDeactivate = false
@@ -139,8 +147,9 @@ struct CapturedScreen: Sendable {
             windows.append(panel)
         }
         let point = NSEvent.mouseLocation
-        for window in windows where !window.frame.contains(point) { presentWindow(window) }
-        if let active = windows.first(where: { $0.frame.contains(point) }) ?? windows.first { presentWindow(active) }
+        let active = windows.first(where: { $0.frame.contains(point) }) ?? windows.first
+        for window in windows where window !== active { presentWindow(window) }
+        if let active { presentWindow(active) }
     }
 
     func claim(_ id: CGDirectDisplayID) -> Bool {
@@ -168,6 +177,7 @@ struct CapturedScreen: Sendable {
         screenObserver = nil
         for window in windows {
             (window.contentView as? ScreenshotOverlay)?.dispose()
+            (window.contentView as? ScreenshotOverlay)?.releaseDisplayResources()
             window.contentView = nil
             window.close()
         }
@@ -190,6 +200,15 @@ struct CapturedScreen: Sendable {
         view.showToolbar()
         exportTask = Task { [weak self, weak view] in
             do {
+                if output == .pin {
+                    let archive = try await PinnedImageWorker.shared.archive(base: base, pointSize: size, annotations: annotations)
+                    guard let self, let view, self.generation == version, !Task.isCancelled else { return }
+                    self.pins.show(archive, sourceID: self.sourceID, sourceName: self.sourceName,
+                        origin: view.window?.convertToScreen(NSRect(x: view.selection.minX,
+                            y: view.bounds.height - view.selection.maxY, width: 0, height: 0)).origin)
+                    self.cancel()
+                    return
+                }
                 let image = try await ScreenshotRenderWorker.shared.export(
                     base: base, pointSize: size, annotations: annotations)
                 guard let self, let view, self.generation == version, !Task.isCancelled else { return }
@@ -214,14 +233,7 @@ struct CapturedScreen: Sendable {
                         self.restoreEditor(view)
                         return
                     }
-                case .pin:
-                    self.pins.show(
-                        image, sourceID: self.sourceID, sourceName: self.sourceName,
-                        origin: view.window?.convertToScreen(
-                            NSRect(
-                                x: view.selection.minX,
-                                y: view.bounds.height - view.selection.maxY, width: 0, height: 0)
-                        ).origin)
+                case .pin: break
                 }
                 self.cancel()
             } catch {

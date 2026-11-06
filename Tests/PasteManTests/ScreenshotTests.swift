@@ -159,6 +159,34 @@ private func pixel(_ image: CGImage, _ x: Int, _ y: Int) -> [UInt8] {
 }
 
 @Suite("Screenshot integration", .serialized) @MainActor struct ScreenshotIntegrationTests {
+    @Test func fullScreenOverlaysDoNotAnimateWhenPresentedOrClosed() async throws {
+        let service = DelayedScreenCapture()
+        var presented: [NSPanel] = []
+        let coordinator = ScreenshotCoordinator(captureService: service, presentWindow: { panel in
+            #expect(panel.animationBehavior == .none)
+            presented.append(panel)
+        })
+        defer { coordinator.cancel() }
+        let screens = [
+            ScreenshotScreen(id: 10, frame: CGRect(x: -800, y: -120, width: 800, height: 600), scale: 1),
+            ScreenshotScreen(id: 11, frame: CGRect(x: 0, y: 0, width: 800, height: 600), scale: 2),
+        ]
+        coordinator.start(screens: screens, sourceID: "test", sourceName: "Synthetic grid")
+        for _ in 0..<100 where service.calls == 0 { await Task.yield() }
+        service.continuation?.resume(returning: screens.map {
+            CapturedScreen(screen: $0, image: testImage(width: 800, height: 600))
+        })
+        for _ in 0..<200 where coordinator.phase == .capturing { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(presented.count == screens.count)
+        for (window, screen) in zip(coordinator.windows, screens) {
+            #expect(window.frame == screen.frame)
+            #expect(window.styleMask.contains(.nonactivatingPanel))
+            #expect(window.animationBehavior == .none)
+        }
+        coordinator.cancel()
+        #expect(presented.allSatisfy { $0.animationBehavior == .none && !$0.isVisible })
+    }
+
     @Test func pendingCaptureRejectsReentryAndDiscardsLateResultsAfterCancellation() async throws {
         let service = DelayedScreenCapture()
         let coordinator = ScreenshotCoordinator(captureService: service)
@@ -333,6 +361,25 @@ private func pixel(_ image: CGImage, _ x: Int, _ y: Int) -> [UInt8] {
         #expect(value.png == expected.png)
     }
 
+    @Test func disablingDuringSaveCancelsExportAndDoesNotRestoreTheEditor() async throws {
+        var pendingSave: CheckedContinuation<Bool, Never>?
+        let (coordinator, view) = try await editor(save: { _ in
+            await withCheckedContinuation { pendingSave = $0 }
+        })
+        defer { coordinator.cancel() }
+        let window = try #require(coordinator.windows.first)
+        view.state.action?(.save)
+        for _ in 0..<200 where pendingSave == nil { try await Task.sleep(for: .milliseconds(5)) }
+        let save = try #require(pendingSave)
+        coordinator.isEnabled = false
+        coordinator.isEnabled = true
+        save.resume(returning: false)
+        for _ in 0..<20 { await Task.yield() }
+        #expect(coordinator.phase == .idle && coordinator.windows.isEmpty)
+        #expect(window.contentView == nil && !window.isVisible)
+        #expect(view.state.error == nil)
+    }
+
     @Test func saveCancellationAndFailurePreserveEditorAndSavingDoesNotCopy() async throws {
         var savedPng: Data?
         let (cancelled, first) = try await editor(save: { data in
@@ -403,6 +450,7 @@ private func pixel(_ image: CGImage, _ x: Int, _ y: Int) -> [UInt8] {
                 eventNumber: 0, clickCount: 1, pressure: 0))
         let copy = try #require(window.contentView?.menu(for: event)?.items.first)
         #expect(NSApp.sendAction(try #require(copy.action), to: copy.target, from: copy))
+        for _ in 0..<200 where copies == 0 { try await Task.sleep(for: .milliseconds(5)) }
         #expect(copies == 1)
         let doubleClick = try #require(
             NSEvent.mouseEvent(
@@ -462,7 +510,7 @@ private func pixel(_ image: CGImage, _ x: Int, _ y: Int) -> [UInt8] {
         #expect(window.frame == beforeIgnoredEvents)
     }
 
-    @Test func pinnedScrollZoomClampsRepeatedInputAndPreservesOriginalCopyAndReset() throws {
+    @Test func pinnedScrollZoomClampsRepeatedInputAndPreservesOriginalCopyAndReset() async throws {
         let image = try ScreenshotRenderer.export(
             base: testImage(width: 600, height: 400), pointSize: CGSize(width: 600, height: 400), annotations: [])
         let pins = PinnedScreenshotManager(presentWindow: { _ in })
@@ -482,8 +530,11 @@ private func pixel(_ image: CGImage, _ x: Int, _ y: Int) -> [UInt8] {
         let menu = try #require(view.menu(for: increase))
         let copy = try #require(menu.items.first)
         #expect(NSApp.sendAction(try #require(copy.action), to: copy.target, from: copy))
+        for _ in 0..<200 where copied == nil { try await Task.sleep(for: .milliseconds(5)) }
         #expect(copied?.png == image.png && copied?.pointSize == image.pointSize)
-        #expect(copied?.image === image.image)
+        let pixels = try #require(copied?.image)
+        #expect(pixels.width == image.image.width && pixels.height == image.image.height)
+        #expect(pixel(pixels, 10, 10) == pixel(image.image, 10, 10))
         let reset = menu.items[2]
         #expect(NSApp.sendAction(try #require(reset.action), to: reset.target, from: reset))
         #expect(view.bounds.size == image.pointSize)

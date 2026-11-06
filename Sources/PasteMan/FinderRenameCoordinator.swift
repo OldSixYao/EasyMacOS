@@ -191,12 +191,13 @@ struct FinderRenameSnapshot {
         notice.backgroundColor = .windowBackgroundColor
         notice.hasShadow = true
         let text = NSTextField(labelWithString: needsPermission
-            ? "文件已创建，自动重命名需要辅助功能权限" : "文件已创建，可选中后按回车重命名")
+            ? L.t("File created. Accessibility access is required to rename automatically.", "文件已创建，自动重命名需要辅助功能权限")
+            : L.t("File created. Select it and press Return to rename.", "文件已创建，可选中后按回车重命名"))
         text.frame = NSRect(x: 16, y: needsPermission ? 72 : 22, width: 408, height: 22)
         text.alignment = .center
         notice.contentView?.addSubview(text)
         if needsPermission {
-            let button = NSButton(title: "开启自动重命名…", target: actions, action: #selector(enableRename))
+            let button = NSButton(title: L.t("Enable automatic rename…", "开启自动重命名…"), target: actions, action: #selector(enableRename))
             button.bezelStyle = .rounded
             button.frame = NSRect(x: 130, y: 20, width: 180, height: 32)
             notice.contentView?.addSubview(button)

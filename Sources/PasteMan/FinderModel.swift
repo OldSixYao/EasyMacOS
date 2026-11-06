@@ -12,7 +12,7 @@ import Observation
 
     init(store: FinderConfigurationStore = FinderConfigurationStore()) {
         self.store = store
-        do { configuration = try store.load() } catch { message = "菜单配置无法读取，请重新设置后保存。" }
+        do { configuration = try store.load() } catch { message = L.t("Could not read menu settings. Save them again.", "菜单配置无法读取，请重新设置后保存。") }
         refreshExtensionStatus()
     }
 
@@ -24,6 +24,13 @@ import Observation
     func enableAutomaticRename() {
         FinderRenameAccess.request()
         refreshExtensionStatus()
+    }
+
+    func setLanguage(_ language: AppLanguage) {
+        guard configuration.language != language else { return }
+        var updated = configuration
+        updated.language = language
+        save(updated)
     }
 
     func setEnabled(_ enabled: Bool) {
@@ -41,7 +48,7 @@ import Observation
     @discardableResult func addFileType(_ input: String) -> Bool {
         var updated = configuration
         do { try updated.addFileType(input) }
-        catch { message = error.localizedDescription; return false }
+        catch { message = (error as? FinderMenuError)?.description(in: L.language) ?? error.localizedDescription; return false }
         return save(updated)
     }
 
@@ -54,7 +61,7 @@ import Observation
     func restoreDefaults() {
         var updated = configuration
         do { try updated.restoreDefaults(); save(updated) }
-        catch { message = error.localizedDescription }
+        catch { message = (error as? FinderMenuError)?.description(in: L.language) ?? error.localizedDescription }
     }
 
     @discardableResult private func save(_ updated: FinderConfiguration) -> Bool {
@@ -63,7 +70,7 @@ import Observation
             configuration = updated
             message = nil
             return true
-        } catch { message = "无法保存菜单配置：\(error.localizedDescription)"; return false }
+        } catch { message = L.t("Could not save menu settings: \(error.localizedDescription)", "无法保存菜单配置：\(error.localizedDescription)"); return false }
     }
 
     func manageExtension() { FIFinderSyncController.showExtensionManagementInterface() }

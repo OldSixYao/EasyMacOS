@@ -11,7 +11,7 @@ import AppKit
         guard board.writeObjects([directory as NSURL]), performService("New Terminal at Folder", board) else {
             throw NSError(
                 domain: "EasyMacOS.Finder", code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "系统终端服务不可用，请稍后重试。"])
+                userInfo: [NSLocalizedDescriptionKey: L.t("The Terminal service is unavailable. Try again later.", "系统终端服务不可用，请稍后重试。")])
         }
     }
 }

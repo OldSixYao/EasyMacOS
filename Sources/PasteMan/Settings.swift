@@ -22,6 +22,20 @@ struct Shortcut: Codable, Equatable {
     var retentionDays: Int { didSet { defaults.set(retentionDays, forKey: "retentionDays") } }
     var historyLimit: Int { didSet { defaults.set(historyLimit, forKey: "historyLimit") } }
     var excludedApps: Set<String> { didSet { defaults.set(excludedApps.sorted(), forKey: "excludedApps") } }
+    @ObservationIgnored var onClipboardChanged: (() -> Void)?
+    @ObservationIgnored var onScreenshotChanged: (() -> Void)?
+    var clipboardEnabled: Bool {
+        didSet {
+            defaults.set(clipboardEnabled, forKey: "clipboardEnabled")
+            if oldValue != clipboardEnabled { onClipboardChanged?() }
+        }
+    }
+    var screenshotEnabled: Bool {
+        didSet {
+            defaults.set(screenshotEnabled, forKey: "screenshotEnabled")
+            if oldValue != screenshotEnabled { onScreenshotChanged?() }
+        }
+    }
     @ObservationIgnored var onMouseChanged: (() -> Void)?
     var mouse: MouseScrollConfiguration {
         didSet {
@@ -61,6 +75,8 @@ struct Shortcut: Codable, Equatable {
         retentionDays = max(1, defaults.object(forKey: "retentionDays") as? Int ?? 30)
         historyLimit = max(1, defaults.object(forKey: "historyLimit") as? Int ?? 500)
         excludedApps = defaults.stringArray(forKey: "excludedApps").map(Set.init) ?? PrivacyPolicy.defaultExcludedApps
+        clipboardEnabled = defaults.object(forKey: "clipboardEnabled") as? Bool ?? true
+        screenshotEnabled = defaults.object(forKey: "screenshotEnabled") as? Bool ?? true
         mouse = defaults.data(forKey: "mouseScrollConfiguration")
             .flatMap { try? JSONDecoder().decode(MouseScrollConfiguration.self, from: $0) }?.normalized ?? .init()
         shortcut =

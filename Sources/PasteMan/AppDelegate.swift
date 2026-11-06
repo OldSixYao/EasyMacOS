@@ -27,7 +27,8 @@ import SwiftUI
     }
 }
 
-@MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+@MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
+    let updates: any UpdateChecking
     private var statusItem: NSStatusItem!
     private var panel: HistoryPanel?
     private var settingsWindow: NSWindow?
@@ -36,6 +37,7 @@ import SwiftUI
     private var monitor: ClipboardMonitor?
     private var hotKeys: HotKeyService?
     private var screenshots: ScreenshotCoordinator?
+    private var modules: ModuleController?
     private var outsideMonitor: Any?
     private var lastExternalApp: NSRunningApplication?
     private var workspaceObserver: NSObjectProtocol?
@@ -43,6 +45,11 @@ import SwiftUI
     private var lockObservers: [NSObjectProtocol] = []
     private var menuOpen = false
     private let finderRequests = FinderRequestQueue()
+
+    init(updates: any UpdateChecking = UpdateController()) {
+        self.updates = updates
+        super.init()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -64,39 +71,48 @@ import SwiftUI
         do {
             let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             let settings = AppSettings()
-            let repository = try HistoryStore(directory: base.appendingPathComponent("PasteMan", isDirectory: true))
+            let repository = try RecoveringHistoryRepository(directory: base.appendingPathComponent("PasteMan", isDirectory: true))
             let permissions = PermissionService()
             permissions.refresh()
             let keys = HotKeyService()
-            let state = AppModel(repository: repository, settings: settings, permissions: permissions, hotKeys: keys)
+            let state = AppModel(repository: repository, settings: settings, permissions: permissions, hotKeys: keys, updates: updates)
             model = state
             let mouseScroll = state.mouseScroll
+            state.finderModel.setLanguage(L.language)
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(interfaceLanguageChanged), name: InterfaceLocalization.didChange, object: nil)
             hotKeys = keys
             let watcher = ClipboardMonitor(
                 clipboard: SystemClipboard(), repository: repository, settings: settings, permissions: permissions)
             monitor = watcher
             for (name, reason) in [(NSWorkspace.willSleepNotification, "sleep"), (NSWorkspace.sessionDidResignActiveNotification, "session"), (NSWorkspace.screensDidSleepNotification, "display")] {
-                sessionObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak mouseScroll] _ in
+                sessionObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak watcher, weak mouseScroll] _ in
                     MainActor.assumeIsolated {
+                        watcher?.setSessionActive(false, reason: reason)
                         mouseScroll?.setSessionActive(false, reason: reason)
                     }
                 })
             }
             for (name, reason) in [(NSWorkspace.didWakeNotification, "sleep"), (NSWorkspace.sessionDidBecomeActiveNotification, "session"), (NSWorkspace.screensDidWakeNotification, "display")] {
-                sessionObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak mouseScroll] _ in
+                sessionObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak watcher, weak mouseScroll] _ in
                     MainActor.assumeIsolated {
+                        watcher?.setSessionActive(true, reason: reason)
                         mouseScroll?.setSessionActive(true, reason: reason)
                     }
                 })
             }
             for (name, active) in [("com.apple.screenIsLocked", false), ("com.apple.screenIsUnlocked", true)] {
-                lockObservers.append(DistributedNotificationCenter.default().addObserver(forName: Notification.Name(name), object: nil, queue: .main) { [weak mouseScroll] _ in
+                lockObservers.append(DistributedNotificationCenter.default().addObserver(forName: Notification.Name(name), object: nil, queue: .main) { [weak watcher, weak mouseScroll] _ in
                     MainActor.assumeIsolated {
+                        watcher?.setSessionActive(active, reason: "lock")
                         mouseScroll?.setSessionActive(active, reason: "lock")
                     }
                 })
             }
-            settings.onRecordingChanged = { [weak watcher] in watcher?.recordingStateChanged() }
+            settings.onRecordingChanged = { [weak watcher, weak self] in
+                watcher?.recordingStateChanged()
+                self?.refreshRecordingStatus()
+            }
             watcher.onChange = { [weak state] in state?.changed() }
             watcher.onError = { [weak state] in state?.recordingIssue = L.error($0) }
             watcher.onCaptureSucceeded = { [weak state] in state?.recordingIssue = nil }
@@ -107,9 +123,6 @@ import SwiftUI
             state.onClear = { [weak self] in self?.confirmClear() }
             state.onPause = { [weak self] in self?.togglePause() }
             keys.onInvoke = { [weak self] in self?.togglePanel(fromMenuBar: false) }
-            if !keys.register(settings.shortcut) {
-                state.message = L.t("Shortcut unavailable. Set another shortcut in Settings.", "快捷键已被占用，请在设置中修改。")
-            }
             let screenshotController = ScreenshotCoordinator()
             screenshots = screenshotController
             keys.onScreenshot = { [weak self] in self?.startScreenshot() }
@@ -133,8 +146,9 @@ import SwiftUI
                     guard let ticket else { return }
                     do {
                         try await watcher?.recordScreenshot(
-                            image.png, sourceID: sourceID, sourceName: sourceName, ticket: ticket)
+                            image, sourceID: sourceID, sourceName: sourceName, ticket: ticket)
                     } catch {
+                        guard watcher?.screenshotTicket(sourceID: sourceID) == ticket else { return }
                         self?.model?.recordingIssue = L.error(error)
                         let alert = NSAlert()
                         alert.messageText = L.t("Copied; history not saved", "已复制，未保存到历史")
@@ -145,20 +159,18 @@ import SwiftUI
                 }
                 return true
             }
-            if settings.screenshotShortcut.matches(settings.shortcut)
-                || !keys.register(settings.screenshotShortcut, for: .screenshot)
-            {
-                state.message = L.t("Screenshot shortcut unavailable. Choose another in Settings.", "截图快捷键不可用，请在设置中修改。")
+            let modules = ModuleController(settings: settings, hotKeys: keys, monitor: watcher, screenshots: screenshotController)
+            self.modules = modules
+            modules.onClipboardDisabled = { [weak self, weak state] in
+                state?.suspendClipboard()
+                self?.hidePanel()
             }
+            modules.onStatusChanged = { [weak self] in self?.refreshRecordingStatus() }
+            modules.onShortcutIssue = { [weak state] action, issue in state?.shortcutIssues[action] = issue }
             setupStatusItem()
             trackExternalApps()
-            watcher.start()
+            modules.start()
             mouseScroll.start()
-            Task {
-                do { try await repository.prune(policy: settings.policy, now: Date()) } catch {
-                    state.message = L.error(error)
-                }
-            }
             let openingFinderSettings = CommandLine.arguments.contains("--finder-settings")
             if !settings.hasOnboarded, !finderRequests.hasPending, !openingFinderSettings { showWelcome() }
             if openingFinderSettings { showFinderSettings() }
@@ -184,21 +196,23 @@ import SwiftUI
         }
         do {
             let request = try FinderRequest(url: url)
+            guard model?.finderModel.configuration.contains(request.action) == true else { return }
             hidePanel()
             await FinderActionHandler().perform(request)
         } catch { FinderActionHandler.show(error) }
     }
 
+    @objc private func interfaceLanguageChanged() {
+        setupMainMenu()
+        refreshRecordingStatus()
+        settingsWindow?.title = L.t("EasyMacOS Settings", "EasyMacOS 设置")
+        model?.finderModel.setLanguage(L.language)
+    }
+
     private func setupMainMenu() {
         let main = NSMenu()
         let appItem = NSMenuItem()
-        let appMenu = NSMenu()
-        addVersionItem(to: appMenu)
-        appMenu.addItem(.separator())
-        addMenu(appMenu, L.t("Settings…", "设置…"), #selector(showSettings), key: ",")
-        appMenu.addItem(.separator())
-        addMenu(appMenu, L.t("Quit EasyMacOS", "退出 EasyMacOS"), #selector(quit), key: "q")
-        appItem.submenu = appMenu
+        appItem.submenu = makeApplicationMenu()
         main.addItem(appItem)
         let edit = NSMenuItem(title: L.t("Edit", "编辑"), action: nil, keyEquivalent: "")
         let editMenu = NSMenu(title: edit.title)
@@ -215,6 +229,26 @@ import SwiftUI
         main.addItem(edit)
         NSApp.mainMenu = main
     }
+
+    func makeApplicationMenu() -> NSMenu {
+        let appMenu = NSMenu()
+        addVersionItem(to: appMenu)
+        appMenu.addItem(.separator())
+        addMenu(appMenu, L.t("Settings…", "设置…"), #selector(showSettings), key: ",")
+        addMenu(appMenu, L.t("Check for Updates…", "检查更新…"), #selector(checkForUpdates))
+        appMenu.addItem(.separator())
+        addMenu(appMenu, L.t("Quit EasyMacOS", "退出 EasyMacOS"), #selector(quit), key: "q")
+        return appMenu
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        menuItem.action != #selector(checkForUpdates) || updates.canCheckForUpdates
+    }
+
+    @objc func checkForUpdates() {
+        hidePanel()
+        updates.checkForUpdates()
+    }
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         guard let button = statusItem.button else { return }
@@ -225,7 +259,8 @@ import SwiftUI
     }
     private func refreshRecordingStatus() {
         guard let model, let button = statusItem?.button else { return }
-        RecordingStatusAppearance(paused: model.settings.paused, applicationLabel: AppVersion.current.applicationLabel)
+        RecordingStatusAppearance(paused: model.settings.paused, applicationLabel: AppVersion.current.applicationLabel,
+                                  clipboardEnabled: model.settings.clipboardEnabled)
             .apply(to: button)
     }
     private func trackExternalApps() {
@@ -247,7 +282,7 @@ import SwiftUI
         }
     }
     @objc private func statusClicked() {
-        if NSApp.currentEvent?.type == .rightMouseUp {
+        if NSApp.currentEvent?.type == .rightMouseUp || model?.settings.clipboardEnabled == false {
             showMenu()
         } else {
             // A menu-bar click always opens history, even if focus loss just dismissed the panel.
@@ -263,7 +298,7 @@ import SwiftUI
     }
     private func showPanel(fromMenuBar: Bool) {
         guard screenshots?.isActive != true else { return }
-        guard let model else { return }
+        guard let model, model.settings.clipboardEnabled else { return }
         if !model.settings.hasOnboarded {
             showWelcome()
             return
@@ -342,37 +377,45 @@ import SwiftUI
     private func showMenu() {
         guard let model, let button = statusItem.button else { return }
         menuOpen = true
+        let menu = makeStatusMenu(for: model)
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.minY), in: button)
+        menuOpen = false
+    }
+    func makeStatusMenu(for model: AppModel) -> NSMenu {
         let menu = NSMenu()
+        menu.autoenablesItems = false
         addVersionItem(to: menu)
         menu.addItem(.separator())
         addMenu(
-            menu, L.t("Screenshot", "截图") + "  " + model.settings.screenshotShortcut.label, #selector(startScreenshot))
+            menu, L.t("Screenshot", "截图") + "  " + model.settings.screenshotShortcut.label, #selector(startScreenshot),
+            enabled: model.settings.screenshotEnabled)
         addMenu(menu, L.t("Close all pinned screenshots", "关闭所有钉图"), #selector(closeAllPins))
         addMenu(menu, L.t("Finder menu…", "访达右键…"), #selector(showFinderSettings))
         menu.addItem(.separator())
         addMenu(
             menu, model.settings.paused ? L.t("Resume recording", "恢复记录") : L.t("Pause recording", "暂停记录"),
-            #selector(togglePause))
-        addMenu(menu, L.t("Clear history…", "清空历史…"), #selector(confirmClear))
+            #selector(togglePause), enabled: model.settings.clipboardEnabled)
+        addMenu(menu, L.t("Clear history…", "清空历史…"), #selector(confirmClear), enabled: model.settings.clipboardEnabled)
         menu.addItem(.separator())
         addMenu(menu, L.t("Settings…", "设置…"), #selector(showSettings), key: ",")
+        addMenu(menu, L.t("Check for Updates…", "检查更新…"), #selector(checkForUpdates), enabled: updates.canCheckForUpdates)
         menu.addItem(.separator())
         addMenu(menu, L.t("Quit EasyMacOS", "退出 EasyMacOS"), #selector(quit), key: "q")
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.minY), in: button)
-        menuOpen = false
+        return menu
     }
     private func addVersionItem(to menu: NSMenu) {
         let item = NSMenuItem(title: AppVersion.current.applicationLabel, action: nil, keyEquivalent: "")
         item.isEnabled = false
         menu.addItem(item)
     }
-    private func addMenu(_ menu: NSMenu, _ title: String, _ action: Selector, key: String = "") {
+    private func addMenu(_ menu: NSMenu, _ title: String, _ action: Selector, key: String = "", enabled: Bool = true) {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
         item.target = self
+        item.isEnabled = enabled
         menu.addItem(item)
     }
     @objc private func startScreenshot() {
-        guard let model, screenshots?.isActive != true else { return }
+        guard let model, model.settings.screenshotEnabled, screenshots?.isActive != true else { return }
         guard model.settings.hasOnboarded else {
             showWelcome()
             return
@@ -399,12 +442,12 @@ import SwiftUI
     @objc private func closeAllPins() { screenshots?.pins.closeAll() }
 
     @objc private func togglePause() {
-        guard let model else { return }
+        guard let model, model.settings.clipboardEnabled else { return }
         model.settings.paused.toggle()
         refreshRecordingStatus()
     }
     @objc private func confirmClear() {
-        guard let model else { return }
+        guard let model, model.settings.clipboardEnabled else { return }
         hidePanel()
         NSApp.activate()
         let alert = NSAlert()
@@ -474,6 +517,7 @@ import SwiftUI
     }
     @objc private func quit() { NSApp.terminate(nil) }
     func applicationWillTerminate(_ notification: Notification) {
+        modules?.stop()
         screenshots?.cancel()
         screenshots?.pins.closeAll()
         monitor?.stop()

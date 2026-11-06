@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import FinderMenuCore
 import PasteManCore
 import SwiftUI
 import Testing
@@ -11,6 +12,10 @@ import Testing
     @Test func renderScreens() async throws {
         guard ProcessInfo.processInfo.environment["PASTEMAN_RENDER_TESTS"] == "1" else { return }
         _ = NSApplication.shared
+        if let raw = ProcessInfo.processInfo.environment["PASTEMAN_RENDER_LANGUAGE"],
+           let language = AppLanguage(rawValue: raw) {
+            InterfaceLocalization.shared.setLanguage(language)
+        }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "PasteManRendering-" + UUID().uuidString)
         let suite = "PasteManRendering." + UUID().uuidString
@@ -24,7 +29,8 @@ import Testing
         let store = try HistoryStore(directory: directory)
         let settings = AppSettings(defaults: defaults)
         let permissions = PermissionService()
-        let model = AppModel(repository: store, settings: settings, permissions: permissions, hotKeys: keys)
+        let model = AppModel(repository: store, settings: settings, permissions: permissions, hotKeys: keys,
+            finderModel: FinderModel(store: FinderConfigurationStore(url: directory.appendingPathComponent("finder.json"))))
         settings.hasOnboarded = true
         let now = Date()
         for (index, text) in [
@@ -90,6 +96,20 @@ import Testing
                     to: output.appendingPathComponent("settings-\(tab)-\(mode).png"))
             }
         }
+        settings.screenshotEnabled = false
+        settings.clipboardEnabled = false
+        model.finderModel.setEnabled(false)
+        for tab in [SettingsTab.screenshot, .clipboard, .finder] {
+            for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+                let mode = appearance == .aqua ? "light" : "dark"
+                try await snapshot(
+                    SettingsView(model: model, initialTab: tab), size: NSSize(width: 600, height: 580),
+                    appearance: appearance, to: output.appendingPathComponent("settings-\(tab)-disabled-\(mode).png"))
+            }
+        }
+        settings.screenshotEnabled = true
+        settings.clipboardEnabled = true
+        model.finderModel.setEnabled(true)
         settings.mouse.remoteCompatibility = true
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
             let mode = appearance == .aqua ? "light" : "dark"

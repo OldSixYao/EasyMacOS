@@ -80,7 +80,7 @@ do {
             pageMatches = (text.contains("快捷键") || text.contains("Shortcut"))
                 && !text.contains("保留时间") && !text.contains("Keep history")
         case 2: pageMatches = text.contains("保留时间") || text.contains("Keep history")
-        case 3: pageMatches = text.contains("显示右键菜单") || text.contains("Show context menu")
+        case 3: pageMatches = text.contains("启用右键菜单") || text.contains("Enable context menu")
         case 4: pageMatches = text.contains("启用鼠标增强") || text.contains("Enable mouse enhancement")
         default: pageMatches = text.contains("访达扩展") || text.contains("Finder Extension")
         }

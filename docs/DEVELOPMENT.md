@@ -1,5 +1,19 @@
 # EasyMacOS 开发与使用说明
 
+## 模块独立开关
+
+- 在“截图”“剪贴板”“右键菜单”设置页顶部使用对应总开关；详细设置在关闭时保留并置灰，鼠标增强继续使用鼠标页原有开关。
+- 关闭截图会释放截图快捷键并取消当前截图与未完成导出，已有钉图仍可查看、复制、保存和关闭。
+- 关闭剪贴板会释放历史快捷键、收起面板，停止采集、轮询和自动清理；已有历史、收藏、保留策略、排除名单和暂停状态保留。恢复后只记录新复制的内容，不补录关闭期间内容。
+- 剪贴板关闭时，截图及钉图仍可复制到系统剪贴板，但不会写入历史。菜单栏左击改为打开应用菜单，始终可进入设置重新开启模块。
+- 右键菜单复用现有访达配置，不修改系统扩展授权；关闭后下次打开菜单不显示本应用操作，已生成但尚未开始的菜单请求会被拒绝，正在执行的文件操作正常完成。
+- 开关选择重启后保留。重新开启时若快捷键已被其他应用占用，对应设置页会显示提示，可修改快捷键或释放占用后重新开关；其他模块继续运行。
+
+```sh
+./scripts/test.sh --filter ModuleToggleTests
+PASTEMAN_RENDER_TESTS=1 ./scripts/test.sh --filter RenderingTests
+```
+
 A native, local-only clipboard history and screenshot app for **Apple Silicon · macOS 15+**. Built with SwiftUI, AppKit, and the system SQLite library. No third-party runtime dependencies, cloud sync, analytics, or automatic updater.
 
 ## Build and run
@@ -24,7 +38,7 @@ The app lives in the menu bar and does not appear in the Dock. Start with the we
 - Escape returns from a preview or closes the panel.
 - Right-click the menu bar icon, or use the panel's `…` button, for pause, clear, settings, and quit.
 - Change the shortcut in Settings. A shortcut requires Command, Control, or Option; collisions preserve the previous registration.
-- The interface follows the system language (Simplified Chinese / English) and appearance.
+- 界面支持简体中文、英文和系统深浅外观。历史记录每页加载一百条，滚动或键盘选择会继续加载；数量后的加号表示仍有后续记录。数据库故障时显示重试入口，截图和访达功能继续可用。
 
 本地构建使用**固定的代码签名证书**，不再使用临时签名。`scripts/setup-signing.sh` 首次创建有效期十年的本地自签名证书，私钥以不可导出的方式保存在当前用户默认钥匙串中，只允许系统签名工具访问；仅在当前用户域信任其代码签名用途，不授予网站证书信任。签名身份指纹保存在 `~/Library/Application Support/EasyMacOS/Signing/identity.sha1`，不进入仓库。重复运行初始化脚本复用原身份，不创建替代证书；原证书不可用时停止并提示恢复。
 
@@ -54,7 +68,7 @@ Press **⌃⌥A** or choose **Screenshot** from the menu bar's right-click menu.
 - 钉图使用无标题栏窗口，不显示顶部系统按钮；双击关闭当前钉图。
 - 鼠标悬停在钉图上即可使用滚轮或触控板上下滚动缩放，无需先点击；以鼠标所在位置为缩放中心并保持图片比例。显示比例最低为原图的百分之十（同时遵循窗口最小尺寸），最高为原图的八倍；右键菜单可恢复原始显示比例，复制和保存保持原图分辨率。
 - 同一钉图保存尚未结束时不重复启动保存；关闭钉图会取消尚在等待的保存面板并释放视图，取消及关闭后的迟到错误不再弹窗。用户已经确认文件目标后，开始的原子写入会完成，关闭钉图不撤销已确认的写入。
-- Drag pinned images to move them, resize their edges proportionally, and right-click for Copy, Save, Original size, or Close. Multiple pinned images can be open at once, including in fullscreen Spaces. Use **Close all pinned screenshots** in the menu bar to dismiss them together. Pins stay in memory and are not restored after quitting.
+- 拖动钉图可移动位置，拖动边缘可等比缩放，右键可复制、保存、恢复原始比例或关闭。钉图支持多窗口和全屏空间，菜单栏可统一关闭全部钉图。原图使用私有临时文件保存，所有钉图共用三十二兆字节的显示缓存，复制和保存保留原始分辨率，压缩编码按需执行。关闭后清理临时原图，退出后不恢复钉图。
 
 Only copying a screenshot or pinned image can add it to history. Recording must be enabled, onboarding complete, and clipboard access allowed; the application exclusion list also applies. Source application is a best-effort observation of the foreground app at capture start. Saving or pinning alone does not add history. A successful copy stays on the clipboard even if history storage fails; a separate notice reports that failure. The existing **20 MiB / 40 million pixel** history image limits do not change screenshot export quality. Larger images can be copied/saved/pinned but are skipped by history with a notice.
 
@@ -70,6 +84,10 @@ Window snapping, scrolling screenshots, cross-display selections, OCR, recording
 
 兼容模式仍放行带手势或惯性阶段的触控板事件，不按鼠标型号或输入来源进程猜测设备。某些设备或驱动若同样上报无手势连续事件，也会受到兼容模式影响，切回本机精确滚动或使用其他滚动增强工具时可关闭该选项。命令键或控制键组合滚动、本应用窗口及排除名单中的应用始终直接放行；按事件实际接收进程匹配名单，不以前台应用猜测接收方。未知应用标识不接管。
 
+开启平滑后，所有应用的轻滚与大幅滚动统一使用平滑像素动画，不按网站、浏览器或页面区域切换原生步进。响应时长随剩余位移按连续曲线调整：小距离更快起步和收尾，大距离使用设置时长，避免小输入被过度拉长。速度和反向决定总位移，小数余量在连续输入间保留，换向、窗口和修饰键变化保留原有清理策略。
+
+短距离的响应时长按设置时长乘以剩余像素相对八十像素的平方根计算，最长为设置时长，最短约十七毫秒；八十像素是动画调节的距离尺度，不是网页或事件类型判定阈值。输入仍仅通过原有系统滚轮字段处理，不查询网页地址、元素结构或浏览器标签，也不需要浏览器扩展或自动化权限。不同网页的视频切换规则由网页自身决定，应用不发送方向键、补发额外滚动或承诺任意网页都能一格切换。
+
 鼠标页显示真实的启动与权限状态。首次开启不会后台弹出授权框；点击“开启辅助功能”复用现有授权入口。授权后返回应用会重试，也可在权限页刷新；启动失败可手动重试。无需单独申请输入监控权限。锁屏、休眠、会话离开时取消动画并释放接管，恢复后按保存配置启动；关闭增强立即交还原生滚动。
 
 滚动计算与系统事件边界分离，事件接管和按需动画在专用串行运行循环中执行，动画空闲时不启动计时。设置保存在应用偏好中的 `mouseScrollConfiguration`，不迁移或复用剪贴板排除名单。应用不记录滚动轨迹或输入内容，不附带第三方进程，也不修改参考仓库。
@@ -81,8 +99,9 @@ Window snapping, scrolling screenshots, cross-display selections, OCR, recording
 EASYMACOS_MOUSE_LIVE=1 ./scripts/test.sh --filter MouseScrollDeliveryTests
 # 界面离屏渲染，包含六个标签及鼠标页的深浅外观
 PASTEMAN_RENDER_TESTS=1 ./scripts/test.sh --filter RenderingTests
-# 对已打开的设置窗口检查六标签切换，结束后恢复原标签
+# 对已打开的设置窗口检查六标签与语言切换，结束后恢复原标签和语言
 swift scripts/settings-smoke.swift
+swift scripts/language-smoke.swift
 # 核对安装后总开关与实际接管状态，结束时恢复原开关和标签
 swift scripts/mouse-smoke.swift
 ```
@@ -119,11 +138,11 @@ History is in `~/Library/Application Support/PasteMan/`:
 - `Images/`: normalized PNG images and thumbnails.
 - Preferences: the app's UserDefaults domain (default bundle ID `app.pasteman.PasteMan`).
 
-Ordinary history defaults to **500 entries / 30 days** (either limit applies). Favorites sort first and remain until deleted. A **512 MiB logical content budget** includes UTF-8 text bytes, normalized image bytes, and thumbnail bytes; SQLite overhead, filesystem allocation, and WAL can make actual disk use higher. Ordinary items are evicted oldest first. Favorites are never automatically removed; if they leave insufficient room for an incoming item, that copy is skipped with a visible message. Recording resumes for future copies after space is freed. Cleanup runs at startup, on captures/settings changes, and every minute. Clear history keeps favorites unless explicitly selected otherwise.
+普通历史默认保留三十天、最多五百条，达到任一限制时清理；收藏优先显示并保留至手动删除。逻辑内容容量上限为五百一十二兆字节，包含文本、标准化图片和缩略图，不包含数据库额外空间、文件系统分配及日志开销。优先淘汰最旧的普通记录，收藏不会自动删除；收藏占满容量时跳过新内容并显示提示，释放空间后记录后续复制。启动、复制及保留设置变化时执行清理，后台清理按最近的过期时间调度，最长每小时回查一次；未删除内容时不刷新历史面板。清空历史默认保留收藏。
 
-Identical content updates its existing item's timestamp and source, preserving its ID and favorite status. Source is a best-effort observation of the frontmost application when the 500 ms poll detects a copy, not an authoritative pasteboard author. Very rapid copies between polls may be missed. Pausing/resuming establishes a fresh baseline and does not backfill copies from the pause. Images being prepared when pausing or clearing are invalidated.
+相同内容更新原记录的时间与来源，保留标识和收藏状态。来源取自半秒轮询检测时的前台应用，属于尽力判断；两次轮询之间的快速复制仍可能遗漏。处理已捕获图片期间继续检测后续复制。暂停和恢复会重新建立基线，不回填暂停期间的内容；暂停或清空时，尚在处理的图片失效。
 
-Normal recording polls every 500 ms. Paused/onboarding sessions stop routine clipboard checks and wake for cleanup every minute. When clipboard permission is unavailable, checks back off to five seconds; detecting restored permission establishes a fresh baseline before recording new copies. Resuming or finishing onboarding immediately reschedules normal polling.
+正常记录每半秒检测一次；暂停或尚未完成引导时停止常规检测。锁屏、休眠及会话离开通知会暂停记录并取消待处理内容，恢复后重新建立基线。后台串行队列最多等待八条、合计三十二兆字节，超出时显示提示，便于用户稍后重新复制。剪贴板权限不可用时每五秒检查一次，恢复权限后建立新基线；恢复记录或完成引导会立即重新安排检测。
 
 The first supported item in a clipboard change is stored; image data takes precedence over text in that item. Finder file references are skipped. Text formatting is not retained. Common bitmap formats accepted by ImageIO are normalized to PNG, first frame only, stripping source metadata. Inputs above **20 MiB / 40 million pixels**, invalid images, and unsupported formats are skipped. Animated image playback, OCR, files, rich text, and cloud sync are outside v1.
 
@@ -148,7 +167,42 @@ export VERSION='1.0.0'
 ./scripts/release.sh
 ```
 
-发布脚本构建 `arm64` 版本并启用强化运行时，先签署沙盒访达扩展，再签署 EasyMacOS 宿主应用；随后验证签名、提交公证并附加公证票据，生成包含单个应用的磁盘映像，再为映像签名、公证并进行系统安全评估。任一步骤失败都会停止。当前本机构建尚未执行开发者证书签名与公证；更新通过手动替换应用完成，发布时应保持应用标识和签名身份稳定，以保留偏好设置与权限。
+发布脚本构建 `arm64` 版本并启用强化运行时，先签署更新框架内的辅助程序、框架和沙盒访达扩展，再签署 EasyMacOS 宿主应用；随后验证签名、提交公证并附加公证票据，生成已签名的更新包与清单，再为磁盘映像签名、公证并进行系统安全评估。任一步骤失败都会停止。当前本机构建尚未执行开发者证书签名与公证；开发签名产物仅供本机验证。发布时应保持应用标识和签名身份稳定，以保留偏好设置与权限。
+
+### 应用内检查更新
+
+通用设置、菜单栏菜单和应用菜单共用同一更新服务。更新器采用精确锁定的 `Sparkle 2.10.1`，只在用户点击后启动；关闭自动检查、自动下载安装和系统信息上报。更新窗口使用应用当前界面语言。安装由更新组件负责，包含主应用及内嵌访达扩展，不迁移历史数据或偏好设置。
+
+首次配置更新签名：
+
+```sh
+./scripts/setup-update-signing.sh
+```
+
+工具包下载后先校验固定摘要，缓存保存在 `.build/`。专用更新密钥保存在本机钥匙串的 `EasyMacOS-Update` 账户；重复运行复用原密钥，只把公钥写入 `scripts/Info.plist` 的 `SUPublicEDKey`。保留私钥，不导出到仓库或日志，也不要为重复构建更换更新密钥。
+
+生成本地签名更新包：
+
+```sh
+./scripts/build.sh
+./scripts/package-update.sh
+```
+
+脚本核对钥匙串公钥、主应用及扩展版本、嵌套代码签名后，生成 `dist/updates/EasyMacOS-版本号.zip` 和 `dist/updates/appcast.xml`，并校验压缩包签名。缺少密钥或不匹配时失败，不创建替代密钥。正式发布必须先通过 `scripts/release.sh` 完成签名和公证；该脚本在公证票据附加完成后生成更新包，压缩签名后不能继续修改包内容。
+
+更新源为公开仓库的正式发行附件，清单固定地址为 `https://github.com/OldSixYao/EasyMacOS/releases/latest/download/appcast.xml`。发行标签使用 `v版本号`，例如 `v1.0.31`，同时上传对应版本的更新压缩包及 `appcast.xml`，不能标为预发布版本。清单包含实际构建号、显示版本、最低系统版本和纯文本更新说明；组件依据构建号拒绝相同版本和降级，更新包必须通过内置公钥校验后才能解包安装。脚本不自动提交源码或上传发行附件。
+
+没有发行版本或更新清单时显示“暂时没有可用版本”；网络和服务器故障显示失败并允许重试。现有旧版没有更新入口，第一次需手动安装带此功能的应用，后续才可应用内升级。更新只请求版本清单及安装包，不传输剪贴板、截图或历史记录。
+
+验证命令：
+
+```sh
+./scripts/test.sh --filter UpdateTests
+EASYMACOS_UPDATE_UI=1 ./scripts/test.sh --filter UpdateTests
+python3 scripts/update-smoke.py
+```
+
+界面验证选项会显示测试设置窗口，并把双语界面截图保存到临时目录，供检查按钮布局；入口共享、检查禁用与恢复由自动测试验证。隔离升级验证需已登录的图形桌面，会短暂显示并自动操作验证副本自身的更新窗口；不需要辅助功能权限。脚本使用随机应用标识、临时目录和仅监听回环地址的更新源，复用正式更新界面，验证下载、安装、重新启动、取消安装、版本拒绝及签名失败。验证宿主不启动剪贴板、截图、鼠标或访达服务，不替换正式应用；合成数据、日志和结果仅保留系统临时目录。
 
 ## Architecture
 
@@ -242,17 +296,17 @@ swift scripts/finder-smoke.swift "$PWD/dist/EasyMacOS.app" --move-only
 
 扩展同时注册系统根目录和各挂载卷根目录，并在卷挂载或卸载时刷新注册范围；仅读取卷列表元数据，不扫描卷中文件。这样新挂载的本地磁盘也能显示剪切与粘贴移动菜单。
 
-将 `EasyMacOS.app` 放入 `/Applications` 后打开设置中的“访达”分类。点击“管理访达扩展…”调用系统访达扩展管理界面；在不同系统版本中，入口通常位于“通用 → 登录项与扩展 → 访达扩展”。启用显示名称为“EasyMacOS Finder Menu”的项目，再返回应用核对状态。应用不会自行更改系统扩展开关。
+将 `EasyMacOS.app` 放入 `/Applications` 后打开设置中的“权限”标签页。点击“访达扩展”右侧的“开启…”或“管理…”调用系统访达扩展管理界面；在不同系统版本中，入口通常位于“通用 → 登录项与扩展 → 访达扩展”。启用显示名称为“EasyMacOS Finder Menu”的项目，再返回应用核对状态。应用不会自行更改系统扩展开关。
 
 启用后，在普通本地目录中的文件、文件夹或空白处右键，常用操作直接显示在一级菜单，仅“新建文件”展开文件类型子菜单。新建会在所选文件夹内进行；选择普通文件时使用其所在目录。多选项目只有共同指向同一目录时才允许新建或打开终端，目录不明确时项目会禁用。应用包视作文件，避免在包内创建项目。路径和文件名支持多选逐行复制。新建直接创建零字节的“未命名.后缀”，遇到同名文件、目录或符号链接时依次尝试“未命名 2.后缀”等编号，不覆盖原项目。其他写入错误直接提示。
 
 访达设置支持添加或删除文件类型，默认后缀为 `.txt`、`.json`、`.xml`、`.md`、`.csv`、`.html`、`.css`、`.js`。输入兼容一个前导点、首尾空白和大小写，并按规范化后缀去重；支持 `tar.gz` 等复合后缀，禁止空段、分隔符、冒号、内部空白、控制字符及过长名称。删除全部类型后隐藏新建菜单，恢复默认设置会恢复默认类型与开关，同时保留不复用的类型编号。旧配置缺少类型列表时补入默认类型并保留原开关。
 
-创建后仅定位一次文件，最多等待两秒。已有辅助功能对象读取及键盘事件发送权限，且访达前台、唯一选区为新文件、修饰键已释放时，向该访达进程发送回车，再确认该文件的真实名称编辑框出现。用户切换应用、选区不符、未授权或超时均不向其他项目发送按键；取消重命名保留文件。普通失败显示三秒自动关闭的非激活提示，未授权时显示十秒的权限说明及“开启自动重命名…”按钮。访达设置直接显示此功能的授权状态并提供同一入口，也可复用“权限”分类的入口。只有用户点击授权按钮才请求系统权限，新建流程本身不主动请求权限，也不使用自动化脚本。授权后再次新建即可直接进入访达名称编辑状态。首次从历史临时签名迁移到固定证书，需要重新授权一次。
+创建后仅定位一次文件，最多等待两秒。已有辅助功能对象读取及键盘事件发送权限，且访达前台、唯一选区为新文件、修饰键已释放时，向该访达进程发送回车，再确认该文件的真实名称编辑框出现。用户切换应用、选区不符、未授权或超时均不向其他项目发送按键；取消重命名保留文件。普通失败显示三秒自动关闭的非激活提示，未授权时显示十秒的权限说明及“开启自动重命名…”按钮。设置中的“权限”标签页统一显示辅助功能授权状态并提供开启入口。只有用户点击授权按钮才请求系统权限，新建流程本身不主动请求权限，也不使用自动化脚本。授权后再次新建即可直接进入访达名称编辑状态。首次从历史临时签名迁移到固定证书，需要重新授权一次。
 
 访达跨进程重建扩展菜单时可能丢失图标模板着色。菜单图标采用两种像素密度的普通透明位图，并保留模板标记，每次生成菜单时根据系统深浅外观解析系统文字语义颜色，避免扩展进程的黑色符号在深色访达菜单中直接显示。外观切换后下次右键生效。
 
-配置写入 `~/Library/Application Support/EasyMacOS/finder-menu.json`，通过原子替换保存，下一次右键读取。关闭配置窗口或退出应用后，系统仍管理右键扩展；需要隐藏菜单时关闭“显示右键菜单”，需要完全停用扩展时使用系统设置。新建与打开终端会按需唤醒同一个 EasyMacOS 应用。
+配置写入 `~/Library/Application Support/EasyMacOS/finder-menu.json`，通过原子替换保存，下一次右键读取。关闭配置窗口或退出应用后，系统仍管理右键扩展；需要隐藏菜单时关闭“启用右键菜单”，需要完全停用扩展时使用系统设置。新建与打开终端会按需唤醒同一个 EasyMacOS 应用。
 
 本地构建使用固定证书，同时签署主应用及扩展。访达扩展按系统要求启用沙盒，具有用户所选文件只读权限，以及读取 `~/Library/Application Support/EasyMacOS/` 配置目录的只读例外；扩展不直接创建项目，宿主应用未启用沙盒。公开发布使用现有开发者签名与公证流程，先签扩展、再签 EasyMacOS 宿主应用；发布前核对 EasyMacOS 及扩展标识，并确保扩展标识以宿主标识为前缀。首次迁移签名身份可能需要在系统设置中重新启用扩展。系统保护目录的写入限制仍然生效，失败会显示系统错误。
 
@@ -293,3 +347,57 @@ pluginkit -m -A -D -v -i app.pasteman.PasteMan.FinderExtension
 终端服务只接收独立剪贴板中的一个目录对象，不同时提供纯文本路径，避免系统分别处理两类输入而重复打开窗口。自动检查验证一次菜单点击只产生一个新终端窗口，并从该窗口的目录元数据核对工作目录，不拼接执行终端命令、不读取已有终端内容。
 
 剪贴板监控在前台应用切换时更新检测基线，丢弃切换前尚未检测、无法确认来源的复制；已经捕获且归属确定的图片以及带显式来源的截图继续处理。此策略优先避免错误来源回填，不能保证识别所有后台应用的剪贴板写入。重新复制重复图片时仅检查原图与缩略图是否存在，缺失部分从新复制的数据原子恢复；不重写已有文件，保留记录标识和收藏。
+
+
+## 设置标签栏交互检查
+
+打开已运行应用的设置窗口后，可使用调用进程已有的辅助功能权限验证标签栏：
+
+```sh
+swift scripts/settings-smoke.swift
+```
+
+脚本逐项点击五个标签，并验证左右方向键切换、首尾循环、唯一选中项与键盘焦点一致；结束后恢复原标签。仅读取界面元数据，不读写剪贴板、不更改设置、不请求权限。执行期间会暂时激活设置窗口。
+
+
+## 界面语言
+
+在“通用 → 界面语言”中选择“简体中文”或“English”，立即更新应用界面并保存到本机；未手动选择时按系统首选语言初始化。访达扩展通过共享配置读取选择，下次打开右键菜单时生效。切换语言不改变历史记录、快捷键或权限。
+
+```sh
+# 使用已有辅助功能权限，真实切换两种语言并恢复原语言及标签
+swift scripts/language-smoke.swift
+# 仅在测试进程中生成英文设置预览
+PASTEMAN_RENDER_TESTS=1 PASTEMAN_RENDER_LANGUAGE=en PASTEMAN_RENDER_DIR=/tmp/easymacos-language-en ./scripts/test.sh --filter RenderingTests
+```
+
+语言交互检查会短暂激活设置窗口，并临时改变界面语言；不读写系统剪贴板、不请求权限。自动化语言保存测试使用独立偏好域和临时文件，不覆盖应用真实偏好。
+
+## 可重复性能测量
+
+合成测量使用发布优化配置、临时数据库和合成图片，不读取系统剪贴板，不捕获屏幕，不请求权限。结果仅保留在指定本地目录，不能提交或上传。每个耗时项目先预热一次，再测量七次；内存和捕获数量为独立场景测量。对比应在同一机器、相同系统和相同负载下顺序运行，避免与构建、其他测试或高负载任务重叠。
+
+```sh
+./scripts/benchmark.sh /tmp/easymacos-before-1
+# 在另一份源码或完成改动后执行同一组负载
+./scripts/benchmark.sh /tmp/easymacos-after-1
+EASYMACOS_BENCHMARK_VISIBLE=1 ./scripts/benchmark.sh /tmp/easymacos-visible
+./scripts/compare-benchmarks.py --before /tmp/easymacos-before-1 --after /tmp/easymacos-after-1 --output /tmp/easymacos-comparison.json
+./scripts/profile-performance.sh 进程编号 /tmp/easymacos-process-sample 10
+# 单独测量图片准备、截图导出和钉图缩放同时发生时的采样峰值
+EASYMACOS_MIXED_BENCHMARK_OUTPUT=/tmp/easymacos-mixed ./scripts/test.sh -c release --filter OptimizationBenchmarks/measureMixedImageWorkload
+# 大图变体：三项任务使用六千乘四千像素的同一合成原图
+EASYMACOS_MIXED_LARGE=1 EASYMACOS_MIXED_BENCHMARK_OUTPUT=/tmp/easymacos-mixed-large ./scripts/test.sh -c release --filter OptimizationBenchmarks/measureMixedImageWorkload
+# 输入路径微测量：不发送滚轮事件，图片仅写入并读取独立的临时剪贴板
+EASYMACOS_INPUT_BENCHMARK_OUTPUT=/tmp/easymacos-input ./scripts/test.sh -c release --filter OptimizationBenchmarks/measureInputCosts
+# 单独测量一百二十赫兹模拟时钟下的权限结果复用，不投递鼠标事件
+EASYMACOS_MOUSE_PERMISSION_BENCHMARK_OUTPUT=/tmp/easymacos-mouse-permission ./scripts/test.sh -c release --filter OptimizationBenchmarks/measureMousePermissionCache
+```
+
+比较重要改动时，优化前后分别至少运行两次，把两次目录同时传入 `--before` 或 `--after`。离屏布局不等于可见首帧，局部绘制耗时不等于显示器帧率；测试进程物理占用与发布应用绝对占用不能混用。钉图合成场景固定窗口内容尺寸并等待显示位图准备完成，不将未解码占位状态计为完成。
+
+设置 `EASYMACOS_BENCHMARK_VISIBLE=1` 会短暂显示多张合成钉图并自动关闭，用于计入真实窗口的显示开销，不捕获屏幕或读取用户图片。应只在方便显示测试窗口时使用，并把可见、离屏结果分别对比。创建耗时包含原图后备与显示位图准备；另有六张小钉图期间增减窗口和连续四十次缩放负载。阶段峰值是离散采样最大值，不是连续采样的绝对峰值。
+
+混合图片负载每次使用独立测试进程，按约一毫秒间隔采样物理占用；开始前已经生成原图、压缩数据和钉图后备。应重复多次独立运行，采样峰值不能当作连续绝对峰值。各图片模块保留独立的串行工作器，钉图的显示预算不包含原图输入、处理临时缓冲、窗口合成器和系统缓存，不能当作进程物理内存上限。输入路径微测量不能代表外部应用延迟提供剪贴板内容时的等待，也不能推断真实耗电。
+
+应用通过系统性能标记记录 `HistoryFirstPage`、`HistoryQuery`、`HistorySave`、`ScreenshotExport`、`SystemScreenCapture`、`ClipboardRead` 和 `ClipboardProcessing` 阶段。可在完整开发工具的性能分析器中按应用子系统筛选；仅安装命令行工具的机器可先使用进程采样脚本观察主线程栈。标记不包含文本、图片、路径和来源名称。真实多屏截图延迟、可见交互帧率和硬件耗电需要在对应设备上单独测量，不能从合成数据推断。

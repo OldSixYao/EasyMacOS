@@ -41,13 +41,14 @@ import FinderSync
     func makeMenu(plan: FinderMenuPlan, configuration: FinderConfiguration, usesTarget: Bool) -> NSMenu {
         let menu = NSMenu(title: "EasyMacOS")
         menu.autoenablesItems = false
+        let language = configuration.language ?? .simplifiedChinese
         for action in plan.actions {
-            let item = NSMenuItem(title: action.title, action: nil, keyEquivalent: "")
+            let item = NSMenuItem(title: action.title(in: language), action: nil, keyEquivalent: "")
             item.image = FinderMenuIcon.image(symbol: action.symbol)
             item.isEnabled = plan.allows(action)
-            if !item.isEnabled { item.toolTip = "请选择一个文件夹，或同一目录中的文件。" }
+            if !item.isEnabled { item.toolTip = language.text("Select a folder or files in the same folder.", "请选择一个文件夹，或同一目录中的文件。") }
             if action == .newText {
-                let types = NSMenu(title: action.title)
+                let types = NSMenu(title: action.title(in: language))
                 types.autoenablesItems = false
                 for type in configuration.fileTypes {
                     let child = NSMenuItem(title: "." + type.suffix, action: #selector(performMenuAction(_:)), keyEquivalent: "")
@@ -66,7 +67,7 @@ import FinderSync
             menu.addItem(item)
         }
         if !menu.items.isEmpty { menu.addItem(.separator()) }
-        addSettings(to: menu)
+        addSettings(to: menu, title: language.text("Context Menu Settings…", "访达菜单设置…"))
         return menu
     }
 
@@ -107,6 +108,8 @@ import FinderSync
     }
 
     @MainActor private static func execute(_ request: FinderRequest) {
+        guard let configuration = try? FinderConfigurationStore().load(), configuration.contains(request.action)
+        else { return }
         switch request.action {
         case .copyPath, .copyName:
             guard let value = try? FinderOperations.clipboardText(for: request.action, items: request.items)

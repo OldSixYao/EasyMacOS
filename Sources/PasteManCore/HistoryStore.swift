@@ -26,6 +26,25 @@ public actor HistoryStore: HistoryRepository {
             )
             """)
         try db.execute("CREATE INDEX IF NOT EXISTS history_recency ON history(favorite DESC, copied_at DESC)")
+        try db.execute("CREATE INDEX IF NOT EXISTS history_source ON history(source_id)")
+        try db.execute("CREATE INDEX IF NOT EXISTS history_ordinary ON history(copied_at DESC) WHERE favorite = 0")
+        let database = db
+        try database.transaction {
+            try database.execute("CREATE TABLE IF NOT EXISTS history_totals (id INTEGER PRIMARY KEY CHECK(id=1), bytes INTEGER NOT NULL, pinned INTEGER NOT NULL, ordinary INTEGER NOT NULL)")
+            let columns = try database.rows("PRAGMA table_info(history_totals)") { Database.text($0, 1) }
+            if !columns.contains("ordinary") {
+                try database.execute("ALTER TABLE history_totals ADD COLUMN ordinary INTEGER NOT NULL DEFAULT 0")
+                try database.execute("UPDATE history_totals SET ordinary=(SELECT count(*) FROM history WHERE favorite=0)")
+                for name in ["history_insert_total", "history_delete_total", "history_update_total"] {
+                    try database.execute("DROP TRIGGER IF EXISTS \(name)")
+                }
+            }
+            // 聚合由触发器与数据修改在同一事务中维护，旧库只在首次打开时计算一次。
+            try database.execute("INSERT OR IGNORE INTO history_totals SELECT 1, coalesce(sum(bytes),0), coalesce(sum(CASE WHEN favorite=1 THEN bytes ELSE 0 END),0), coalesce(sum(1-favorite),0) FROM history")
+            try database.execute("CREATE TRIGGER IF NOT EXISTS history_insert_total AFTER INSERT ON history BEGIN UPDATE history_totals SET bytes=bytes+NEW.bytes, pinned=pinned+NEW.favorite*NEW.bytes, ordinary=ordinary+1-NEW.favorite WHERE id=1; END")
+            try database.execute("CREATE TRIGGER IF NOT EXISTS history_delete_total AFTER DELETE ON history BEGIN UPDATE history_totals SET bytes=bytes-OLD.bytes, pinned=pinned-OLD.favorite*OLD.bytes, ordinary=ordinary-1+OLD.favorite WHERE id=1; END")
+            try database.execute("CREATE TRIGGER IF NOT EXISTS history_update_total AFTER UPDATE OF bytes,favorite ON history BEGIN UPDATE history_totals SET bytes=bytes+NEW.bytes-OLD.bytes, pinned=pinned+NEW.favorite*NEW.bytes-OLD.favorite*OLD.bytes, ordinary=ordinary+OLD.favorite-NEW.favorite WHERE id=1; END")
+        }
         try db.execute("PRAGMA user_version = 1")
         let known = Set(try db.rows("SELECT id FROM history WHERE kind = 'image'") { Database.text($0, 0) })
         for file in try fm.contentsOfDirectory(at: imageDirectory, includingPropertiesForKeys: nil) {
@@ -36,6 +55,16 @@ public actor HistoryStore: HistoryRepository {
 
     public func list(search: String = "", filter: HistoryFilter = .all, source: String? = nil) throws -> [HistoryEntry]
     {
+        try query(search: search, filter: filter, source: source, after: nil, limit: nil).entries
+    }
+
+    public func page(search: String = "", filter: HistoryFilter = .all, source: String? = nil,
+                     after: HistoryCursor? = nil, limit: Int = 100) throws -> HistoryPage {
+        try query(search: search, filter: filter, source: source, after: after, limit: max(1, min(500, limit)))
+    }
+    private func query(search: String, filter: HistoryFilter, source: String?, after: HistoryCursor?, limit: Int?) throws -> HistoryPage {
+        let interval = PerformanceTrace.signposter.beginInterval("HistoryQuery", id: PerformanceTrace.signposter.makeSignpostID())
+        defer { PerformanceTrace.signposter.endInterval("HistoryQuery", interval) }
         var clauses = ["1=1"]
         var values: [Database.Value] = []
         if !search.isEmpty {
@@ -53,19 +82,39 @@ public actor HistoryStore: HistoryRepository {
             clauses.append("source_id = ?")
             values.append(.text(source))
         }
-        return try db.rows(
-            "SELECT id, kind, preview, copied_at, source_id, source_name, favorite, bytes FROM history WHERE \(clauses.joined(separator: " AND ")) ORDER BY favorite DESC, copied_at DESC, rowid DESC",
-            values, cancellable: true
-        ) { row in
-            guard let id = UUID(uuidString: Database.text(row, 0)),
-                let kind = ContentKind(rawValue: Database.text(row, 1))
-            else { throw StoreError.missingContent }
-            return HistoryEntry(
-                id: id, kind: kind, preview: Database.text(row, 2),
-                copiedAt: Date(timeIntervalSince1970: sqlite3_column_double(row, 3)),
-                sourceBundleID: Database.text(row, 4), sourceName: Database.text(row, 5),
-                isFavorite: sqlite3_column_int(row, 6) != 0, byteCount: Int(sqlite3_column_int64(row, 7)))
+        if let after {
+            clauses.append("(favorite, copied_at, rowid) < (?, ?, ?)")
+            values += [.int(after.favorite), .real(after.timestamp), .int(Int(after.rowID))]
         }
+        let fields = "id, kind, preview, copied_at, source_id, source_name, favorite, bytes"
+        let tail = " FROM history WHERE \(clauses.joined(separator: " AND ")) ORDER BY favorite DESC, copied_at DESC, rowid DESC"
+        guard let limit else {
+            return HistoryPage(entries: try db.rows("SELECT " + fields + tail, values, cancellable: true,
+                map: Self.decodeEntry), next: nil)
+        }
+        var rowIndex = 0
+        var lastCursor: HistoryCursor?
+        let rows = try db.rows("SELECT " + fields + ", rowid" + tail + " LIMIT \(limit + 1)", values, cancellable: true) { row in
+            let entry = try Self.decodeEntry(row)
+            rowIndex += 1
+            if rowIndex <= limit {
+                lastCursor = HistoryCursor(favorite: entry.isFavorite ? 1 : 0, timestamp: sqlite3_column_double(row, 3),
+                    rowID: sqlite3_column_int64(row, 8), id: entry.id)
+            }
+            return entry
+        }
+        let visible = Array(rows.prefix(limit))
+        let next = rows.count > limit ? lastCursor : nil
+        return HistoryPage(entries: visible, next: next)
+    }
+
+    private static func decodeEntry(_ row: OpaquePointer) throws -> HistoryEntry {
+        guard let id = UUID(uuidString: Database.text(row, 0)), let kind = ContentKind(rawValue: Database.text(row, 1))
+        else { throw StoreError.missingContent }
+        return HistoryEntry(id: id, kind: kind, preview: Database.text(row, 2),
+            copiedAt: Date(timeIntervalSince1970: sqlite3_column_double(row, 3)), sourceBundleID: Database.text(row, 4),
+            sourceName: Database.text(row, 5), isFavorite: sqlite3_column_int(row, 6) != 0,
+            byteCount: Int(sqlite3_column_int64(row, 7)))
     }
 
     public func sources() throws -> [SourceApplication] {
@@ -81,9 +130,10 @@ public actor HistoryStore: HistoryRepository {
         _ content: PreparedContent, sourceBundleID: String, sourceName: String, policy: RetentionPolicy,
         now: Date = Date()
     ) throws {
-        // Read only retention fields once; reuse the surviving snapshot for admission
-        // and eviction instead of materializing UI previews/source strings twice.
-        let entries = try prune(retentionEntries(), policy: policy, now: now)
+        let interval = PerformanceTrace.signposter.beginInterval("HistorySave", id: PerformanceTrace.signposter.makeSignpostID())
+        defer { PerformanceTrace.signposter.endInterval("HistorySave", interval) }
+        try Task.checkCancellation()
+        try prune(policy: policy, now: now)
         let hash = content.hash
         if let existing = try db.rows(
             "SELECT id FROM history WHERE hash = ?", [.text(hash)], map: { Database.text($0, 0) }
@@ -97,7 +147,7 @@ public actor HistoryStore: HistoryRepository {
                 [.real(now.timeIntervalSince1970), .text(sourceBundleID), .text(sourceName), .text(existing)])
             return
         }
-        let pinnedBytes = entries.filter(\.isFavorite).reduce(0) { $0 + $1.byteCount }
+        let pinnedBytes = try totals().pinned
         guard content.byteCount <= policy.byteLimit - pinnedBytes else { throw StoreError.storageFull }
         let id = UUID()
         var created: [URL] = []
@@ -114,18 +164,8 @@ public actor HistoryStore: HistoryRepository {
                 throw error
             }
         }
-        var removed: [RetentionEntry] = []
         do {
             try db.transaction {
-                var total = entries.reduce(0) { $0 + $1.byteCount } + content.byteCount
-                var count = entries.filter { !$0.isFavorite }.count + 1
-                for entry in entries.filter({ !$0.isFavorite }).reversed() {
-                    guard total > policy.byteLimit || count > policy.count else { break }
-                    try db.execute("DELETE FROM history WHERE id = ?", [.text(entry.id.uuidString)])
-                    removed.append(entry)
-                    total -= entry.byteCount
-                    count -= 1
-                }
                 let text: Database.Value
                 let preview: String
                 switch content {
@@ -148,7 +188,7 @@ public actor HistoryStore: HistoryRepository {
             for url in created { try? FileManager.default.removeItem(at: url) }
             throw error
         }
-        try removeImages(removed)
+        try prune(policy: policy, now: now)
     }
 
     public func setFavorite(_ id: UUID, value: Bool) throws {
@@ -167,35 +207,46 @@ public actor HistoryStore: HistoryRepository {
         try db.execute("VACUUM")
     }
     public func prune(policy: RetentionPolicy, now: Date = Date()) throws {
-        _ = try prune(retentionEntries(), policy: policy, now: now)
+        _ = try pruneIfNeeded(policy: policy, now: now)
     }
-    private func prune(_ entries: [RetentionEntry], policy: RetentionPolicy, now: Date) throws -> [RetentionEntry] {
-        let cutoff = now.addingTimeInterval(-Double(policy.days) * 86400)
-        var ordinaryCount = 0
+    public func nextCleanup(policy: RetentionPolicy, now: Date) throws -> Date {
+        let oldest = try db.rows("SELECT min(copied_at) FROM history WHERE favorite=0") { row -> Double? in
+            sqlite3_column_type(row, 0) == SQLITE_NULL ? nil : sqlite3_column_double(row, 0)
+        }.first ?? nil
+        return min(now.addingTimeInterval(3600), oldest.map {
+            Date(timeIntervalSince1970: $0 + Double(policy.days) * 86400 + 1)
+        } ?? now.addingTimeInterval(3600))
+    }
+    public func pruneIfNeeded(policy: RetentionPolicy, now: Date = Date()) throws -> Bool {
+        let cutoff = now.addingTimeInterval(-Double(policy.days) * 86400).timeIntervalSince1970
         var removed: [RetentionEntry] = []
-        var kept: [RetentionEntry] = []
-        for entry in entries {
-            if !entry.isFavorite {
-                ordinaryCount += 1
-                if entry.copiedAt < cutoff || ordinaryCount > policy.count {
-                    removed.append(entry)
-                    continue
-                }
-            }
-            kept.append(entry)
-        }
-        var total = kept.reduce(0) { $0 + $1.byteCount }
-        for entry in kept.reversed() where !entry.isFavorite && total > policy.byteLimit {
-            removed.append(entry)
-            total -= entry.byteCount
-        }
-        guard !removed.isEmpty else { return kept }
         try db.transaction {
-            for entry in removed { try db.execute("DELETE FROM history WHERE id = ?", [.text(entry.id.uuidString)]) }
+            // 仅返回需要删除的记录，不再为每次复制装载所有历史。
+            let expired = try retentionEntries(whereSQL: "favorite = 0 AND copied_at < ?", values: [.real(cutoff)])
+            try deleteRows(expired)
+            removed += expired
+            if try totals().ordinary > policy.count {
+                let overflow = try retentionEntries(whereSQL: "rowid IN (SELECT rowid FROM history WHERE favorite=0 ORDER BY copied_at DESC, rowid DESC LIMIT -1 OFFSET ?)", values: [.int(policy.count)])
+                try deleteRows(overflow)
+                removed += overflow
+            }
+            let excess = try totals().bytes - policy.byteLimit
+            if excess > 0 {
+                let capacity = try retentionEntries(whereSQL: "rowid IN (SELECT rowid FROM (SELECT rowid, sum(bytes) OVER (ORDER BY copied_at ASC, rowid ASC ROWS UNBOUNDED PRECEDING)-bytes AS previous FROM history WHERE favorite=0) WHERE previous < ?)", values: [.int(excess)])
+                try deleteRows(capacity)
+                removed += capacity
+            }
         }
         try removeImages(removed)
-        let removedIDs = Set(removed.map(\.id))
-        return kept.filter { !removedIDs.contains($0.id) }
+        return !removed.isEmpty
+    }
+    private func totals() throws -> (bytes: Int, pinned: Int, ordinary: Int) {
+        try db.rows("SELECT bytes, pinned, ordinary FROM history_totals WHERE id=1") {
+            (Int(sqlite3_column_int64($0, 0)), Int(sqlite3_column_int64($0, 1)), Int(sqlite3_column_int64($0, 2)))
+        }.first ?? (0, 0, 0)
+    }
+    private func deleteRows(_ entries: [RetentionEntry]) throws {
+        for entry in entries { try db.execute("DELETE FROM history WHERE id=?", [.text(entry.id.uuidString)]) }
     }
     public func content(for entry: HistoryEntry) throws -> PreparedContent {
         guard
@@ -249,9 +300,9 @@ public actor HistoryStore: HistoryRepository {
         let isFavorite: Bool
         let byteCount: Int
     }
-    private func retentionEntries() throws -> [RetentionEntry] {
+    private func retentionEntries(whereSQL: String = "1=1", values: [Database.Value] = []) throws -> [RetentionEntry] {
         try db.rows(
-            "SELECT id, kind, copied_at, favorite, bytes FROM history ORDER BY favorite DESC, copied_at DESC, rowid DESC"
+            "SELECT id, kind, copied_at, favorite, bytes FROM history WHERE \(whereSQL)", values
         ) { row in
             guard let id = UUID(uuidString: Database.text(row, 0)),
                 let kind = ContentKind(rawValue: Database.text(row, 1))

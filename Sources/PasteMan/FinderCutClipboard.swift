@@ -11,8 +11,8 @@ import FinderMenuCore
         self.store = store
     }
 
-    @discardableResult func cut(_ sources: [URL]) throws -> FinderCutState {
-        let sources = try FinderMoveValidation.sources(sources)
+    @discardableResult func cut(_ sources: [URL], validateFiles: Bool = true) throws -> FinderCutState {
+        let sources = validateFiles ? try FinderMoveValidation.sources(sources) : sources
         let previousID = try store.load()?.commandID ?? 0
         guard previousID < FinderCutState.maximumCommandID else { throw FinderMoveError.expiredCut }
         let token = UUID()
@@ -30,14 +30,14 @@ import FinderMenuCore
         return state
     }
 
-    func current(token: UUID) throws -> (FinderCutState, [URL]) {
+    func current(token: UUID, validateFiles: Bool = true) throws -> (FinderCutState, [URL]) {
         guard let state = try store.load(), state.availableToken(changeCount: board.changeCount) == token else {
             throw FinderMoveError.expiredCut
         }
-        return (state, try files(matching: state))
+        return (state, try files(matching: state, validateFiles: validateFiles))
     }
 
-    func files(matching state: FinderCutState) throws -> [URL] {
+    func files(matching state: FinderCutState, validateFiles: Bool = true) throws -> [URL] {
         guard board.changeCount == state.changeCount,
             let items = board.pasteboardItems, items.count == state.fileCount else { throw FinderMoveError.expiredCut }
         let files = try items.map { item -> URL in
@@ -47,12 +47,12 @@ import FinderMenuCore
             return url
         }
         guard board.changeCount == state.changeCount else { throw FinderMoveError.expiredCut }
-        return try FinderMoveValidation.sources(files)
+        return validateFiles ? try FinderMoveValidation.sources(files) : files.map(\.standardizedFileURL)
     }
 
-    func consume(_ state: FinderCutState) throws {
+    func consume(_ state: FinderCutState, validateFiles: Bool = true) throws {
         guard try store.load() == state else { throw FinderMoveError.expiredCut }
-        _ = try files(matching: state)
+        _ = try files(matching: state, validateFiles: validateFiles)
         var consumed = state
         consumed.consumed = true
         try store.save(consumed)

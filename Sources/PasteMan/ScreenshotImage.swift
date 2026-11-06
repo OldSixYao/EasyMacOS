@@ -1,6 +1,7 @@
 import AppKit
 import CoreText
 import ImageIO
+import PasteManCore
 import UniformTypeIdentifiers
 
 /// All annotation coordinates are measured in points from the selection's top-left corner.
@@ -42,7 +43,7 @@ struct AnnotationColor: Sendable, Equatable {
     ]
 }
 
-struct ScreenshotAnnotation: Sendable {
+struct ScreenshotAnnotation: Sendable, Equatable {
     var tool: AnnotationTool
     var points: [CGPoint]
     var color: AnnotationColor
@@ -230,7 +231,10 @@ enum ScreenshotRenderer {
 
     static func export(base: CGImage, pointSize: CGSize, annotations: [ScreenshotAnnotation]) throws -> ScreenshotImage
     {
-        let image = try render(base: base, pointSize: pointSize, annotations: annotations)
+        try Task.checkCancellation()
+        guard pointSize.width.isFinite, pointSize.height.isFinite, pointSize.width > 0, pointSize.height > 0,
+            base.height > 0, base.width <= 100_000_000 / base.height else { throw ScreenshotImageError.allocationFailed }
+        let image = annotations.isEmpty ? base : try render(base: base, pointSize: pointSize, annotations: annotations)
         return ScreenshotImage(image: image, png: try encode(image), pointSize: pointSize)
     }
 }
@@ -238,16 +242,37 @@ enum ScreenshotRenderer {
 /// A single worker bounds simultaneous bitmap allocations from previews and exports.
 actor ScreenshotRenderWorker {
     static let shared = ScreenshotRenderWorker()
-    func preview(base: CGImage, pointSize: CGSize, annotations: [ScreenshotAnnotation]) throws -> CGImage {
+    func prepareHistory(_ image: ScreenshotImage) throws -> PreparedContent {
+        try autoreleasepool { try ImageProcessor.prepareRenderedImage(image.image, png: image.png) }
+    }
+    private struct PreviewCheckpoint {
+        let session: UUID
+        let size: CGSize
+        let annotations: [ScreenshotAnnotation]
+        let image: CGImage
+    }
+    private var checkpoint: PreviewCheckpoint?
+    func releasePreview(session: UUID) {
+        if checkpoint?.session == session { checkpoint = nil }
+    }
+    func preview(base: CGImage, pointSize: CGSize, annotations: [ScreenshotAnnotation], session: UUID? = nil) throws -> CGImage {
         try Task.checkCancellation()
         let image = try autoreleasepool {
-            try ScreenshotRenderer.render(
+            if let session, let previous = checkpoint, previous.session == session, previous.size == pointSize,
+                annotations.starts(with: previous.annotations) {
+                return try ScreenshotRenderer.render(base: previous.image, pointSize: pointSize,
+                    annotations: Array(annotations.dropFirst(previous.annotations.count)), maximumDimension: 1800)
+            }
+            return try ScreenshotRenderer.render(
                 base: base, pointSize: pointSize, annotations: annotations, maximumDimension: 1800)
         }
         try Task.checkCancellation()
+        if let session { checkpoint = PreviewCheckpoint(session: session, size: pointSize, annotations: annotations, image: image) }
         return image
     }
     func export(base: CGImage, pointSize: CGSize, annotations: [ScreenshotAnnotation]) throws -> ScreenshotImage {
+        let interval = PerformanceTrace.signposter.beginInterval("ScreenshotExport", id: PerformanceTrace.signposter.makeSignpostID())
+        defer { PerformanceTrace.signposter.endInterval("ScreenshotExport", interval) }
         try Task.checkCancellation()
         let image = try autoreleasepool {
             try ScreenshotRenderer.export(base: base, pointSize: pointSize, annotations: annotations)

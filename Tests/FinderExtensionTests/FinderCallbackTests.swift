@@ -42,6 +42,16 @@ import Testing
 }
 
 @Suite("访达菜单层级") struct FinderMenuLayoutTests {
+    @Test func menuUsesConfiguredLanguageWithoutChangingCommands() throws {
+        var configuration = FinderConfiguration()
+        configuration.language = .english
+        let plan = try #require(FinderMenuPlan(items: [URL(fileURLWithPath: "/tmp")], configuration: configuration))
+        let menu = FinderExtension().makeMenu(plan: plan, configuration: configuration, usesTarget: true)
+        #expect(menu.items.map(\.title) == ["New File", "Copy Full Path", "Copy File Name", "Open Terminal Here", "", "Context Menu Settings…"])
+        #expect(menu.items[1].tag == FinderMenuCommand(action: .copyPath, usesTarget: true).tag)
+        #expect(menu.items.first?.submenu?.items.map(\.title) == FinderConfiguration.defaultSuffixes.map { "." + $0 })
+    }
+
     @Test func cutSelectionAndPasteOnlyAppearInTheirContexts() throws {
         let configuration = FinderConfiguration()
         let cut = FinderCutState(token: UUID(), changeCount: 20, fileCount: 2, commandID: 16)

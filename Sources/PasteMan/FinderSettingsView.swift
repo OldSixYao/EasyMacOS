@@ -15,28 +15,12 @@ struct FinderSettingsView: View {
     var body: some View {
         Form {
             Section {
-                PermissionStatusRow(
-                    title: "访达右键菜单", status: model.extensionEnabled ? "已启用" : "尚未启用",
-                    granted: model.extensionEnabled)
-                Text("在系统设置中启用「EasyMacOS 访达菜单」，随后右键文件、文件夹或空白处即可使用。")
-                    .font(.caption).foregroundStyle(.secondary)
-                Button("管理访达扩展…") { model.manageExtension() }
+                Toggle(L.t("Enable context menu", "启用右键菜单"), isOn: Binding(get: { model.configuration.enabled }, set: model.setEnabled))
             }
             Section {
-                PermissionStatusRow(
-                    title: "新建后直接重命名", status: model.automaticRenameEnabled ? "已启用" : "需要辅助功能权限",
-                    granted: model.automaticRenameEnabled)
-                Text("新建后立即在访达中编辑文件名，保留文件后缀；「粘贴（移动）」也使用同一辅助功能权限。请为当前运行的 EasyMacOS 授权。")
-                    .font(.caption).foregroundStyle(.secondary)
-                if !model.automaticRenameEnabled {
-                    Button("开启自动重命名…") { model.enableAutomaticRename() }
-                }
-            }
-            Section {
-                Toggle("显示右键菜单", isOn: Binding(get: { model.configuration.enabled }, set: model.setEnabled))
                 ForEach(FinderAction.menuOrder) { action in
                     Toggle(
-                        action.title,
+                        action.title(in: L.language),
                         isOn: Binding(
                             get: { !model.configuration.disabledActions.contains(action.rawValue) },
                             set: { model.set(action, enabled: $0) })
@@ -44,44 +28,36 @@ struct FinderSettingsView: View {
                     .disabled(!model.configuration.enabled)
                 }
             } header: {
-                Text("常用操作")
-            } footer: {
-                Text("剪切后，在目标目录选择「粘贴（移动）」或按 ⌥⌘V；普通粘贴仍是复制。移动需要辅助功能权限，冲突与撤销由访达处理。修改后，下次右键生效。")
+                Text(L.t("Actions", "常用操作"))
             }
             Section {
                 ForEach(model.configuration.fileTypes) { type in
                     HStack {
                         Text("." + type.suffix)
                         Spacer()
-                        Button("删除") { model.removeFileType(id: type.id) }
-                            .accessibilityLabel("删除 ." + type.suffix)
+                        Button(L.t("Remove", "删除")) { model.removeFileType(id: type.id) }
+                            .accessibilityLabel(L.t("Remove .", "删除 .") + type.suffix)
                     }
                 }
                 HStack {
-                    TextField("后缀，例如 txt 或 tar.gz", text: $newSuffix)
+                    TextField(L.t("File suffix", "文件后缀"), text: $newSuffix)
                         .onSubmit { addFileType() }
-                    Button("添加") { addFileType() }
+                    Button(L.t("Add", "添加")) { addFileType() }
+                        .disabled(newSuffix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
                 if model.configuration.fileTypes.isEmpty {
-                    Text("请添加至少一种文件类型；当前右键菜单隐藏「新建文件」。")
+                    Text(L.t("No file types", "暂无文件类型"))
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Button("恢复默认设置") { model.restoreDefaults() }
+                Button(L.t("Restore defaults", "恢复默认设置")) { model.restoreDefaults() }
             } header: {
-                Text("新建文件类型")
-            } footer: {
-                Text("按上方顺序显示，支持复合后缀。选择类型后立即创建空文件，重名自动编号。已有辅助功能权限时会尝试进入访达原地重命名；可在「权限」中授权，未授权仍可创建。")
+                Text(L.t("New file types", "新建文件类型"))
             }
+            .disabled(!model.configuration.enabled)
             if let message = model.message {
                 Section { Text(message).font(.callout).foregroundStyle(.red) }
             }
         }
         .formStyle(.grouped)
-        .onAppear {
-            model.refreshExtensionStatus()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            model.refreshExtensionStatus()
-        }
     }
 }
