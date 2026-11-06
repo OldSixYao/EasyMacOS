@@ -99,8 +99,6 @@ struct SettingsView: View {
         }
         .frame(width: 600, height: 580)
         .background(Color(nsColor: .windowBackgroundColor))
-        .onChange(of: model.settings.retentionDays) { model.applyRetention() }
-        .onChange(of: model.settings.historyLimit) { model.applyRetention() }
         .onChange(of: model.settings.screenshotEnabled) { cancelRecording(); shortcutError = nil }
         .onChange(of: model.settings.clipboardEnabled) { cancelRecording(); shortcutError = nil }
         .onChange(of: focusedTab) { previous, current in

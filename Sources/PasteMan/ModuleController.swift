@@ -23,6 +23,7 @@ import Foundation
         started = true
         settings.onClipboardChanged = { [weak self] in self?.applyClipboard() }
         settings.onScreenshotChanged = { [weak self] in self?.applyScreenshot() }
+        settings.onRetentionChanged = { [weak self] in self?.monitor.scheduleCleanup() }
         applyClipboard()
         applyScreenshot()
     }
@@ -63,6 +64,7 @@ import Foundation
         started = false
         settings.onClipboardChanged = nil
         settings.onScreenshotChanged = nil
+        settings.onRetentionChanged = nil
         monitor.stop()
         screenshots.isEnabled = false
         hotKeys.unregister(for: .history)

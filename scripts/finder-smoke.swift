@@ -143,7 +143,7 @@ func press(_ element: AXUIElement) throws {
     guard let menu else { throw FinderSmokeError(description: "未找到访达右键菜单。") }
     defer { AXUIElementPerformAction(menu, kAXCancelAction as CFString) }
     // 扩展菜单晚于系统菜单异步加入，不能在菜单刚出现时就断言缺少扩展项目。
-    let requestedTitle = title == ".txt" ? "新建文件" : title
+    let requestedTitle = title.hasPrefix(".") ? "新建文件" : title
     for _ in 0..<100 {
         if children(menu).contains(where: { attribute($0, kAXTitleAttribute) as? String == requestedTitle }) { break }
         try await Task.sleep(for: .milliseconds(50))
@@ -159,7 +159,7 @@ func press(_ element: AXUIElement) throws {
     guard !topItems.contains(where: { attribute($0, kAXTitleAttribute) as? String == "EasyMacOS" }) else {
         throw FinderSmokeError(description: "仍存在旧的外层子菜单。")
     }
-    if title == ".txt" {
+    if title.hasPrefix(".") {
         let creation = topItems.first { attribute($0, kAXTitleAttribute) as? String == "新建文件" }!
         try press(creation)
         guard let type = find(creation, role: kAXMenuItemRole, title: title) else {
@@ -262,6 +262,45 @@ func press(_ element: AXUIElement) throws {
     }
     if CommandLine.arguments.contains("--move-only") {
         try await checkCutAndMove(in: root, host: running)
+        return
+    }
+    if CommandLine.arguments.contains("--office-only") {
+        let focus = FinderFocusObservation(bundleID: bundleID)
+        for suffix in ["docx", "xlsx", "pptx", "pdf"] {
+            let template = appURL.appendingPathComponent("Contents/Resources/EasyMacOS_FinderMenuCore.bundle/OfficeTemplates/blank." + suffix)
+            let expected = try Data(contentsOf: template)
+            let original = root.appendingPathComponent("未命名." + suffix)
+            try Data("需要保留的原内容".utf8).write(to: original)
+            for number in 2...3 {
+                try await invokeFinderMenu("." + suffix, in: root)
+                let output = root.appendingPathComponent("未命名 \(number)." + suffix)
+                for _ in 0..<100 {
+                    if FileManager.default.fileExists(atPath: output.path) { break }
+                    try await Task.sleep(for: .milliseconds(50))
+                }
+                guard (try? Data(contentsOf: output)) == expected else {
+                    throw FinderSmokeError(description: "真实菜单未创建有效模板：" + output.lastPathComponent)
+                }
+                var editing = false
+                for _ in 0..<55 {
+                    if renameField(for: output) != nil { editing = true; break }
+                    try await Task.sleep(for: .milliseconds(50))
+                }
+                if CommandLine.arguments.contains("--expect-rename") && !editing {
+                    throw FinderSmokeError(description: "办公文档未进入原地重命名：" + suffix)
+                }
+                if editing { try cancelRename(for: output) }
+                guard try Data(contentsOf: output) == expected else {
+                    throw FinderSmokeError(description: "取消重命名后文档内容改变：" + suffix)
+                }
+                print("通过：真实访达菜单创建 \(output.lastPathComponent)，模板内容一致，\(editing ? "原地重命名并取消" : "保留文件")。")
+            }
+            guard try String(contentsOf: original, encoding: .utf8) == "需要保留的原内容" else {
+                throw FinderSmokeError(description: "办公文档覆盖了同名原件：" + suffix)
+            }
+        }
+        guard focus.hostActivations == 0 else { throw FinderSmokeError(description: "办公新建时宿主抢占前台。") }
+        print("通过：四种办公文档真实菜单连续新建、同名保护、取消后保留和后台焦点。")
         return
     }
     let contextMenu = CommandLine.arguments.contains("--context-menu")

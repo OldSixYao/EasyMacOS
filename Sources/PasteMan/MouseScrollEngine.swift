@@ -18,9 +18,14 @@ struct MouseScrollPermissionGate {
 }
 
 struct MouseScrollConfiguration: Codable, Equatable, Sendable {
+    static let minimumStepRange = 0.01...100.0
+    static let speedRange = 0.5...10.0
+    static let durationLevelRange = 1.0...5.0
+
     var enabled = false
     var smooth = true
     var reversed = false
+    var minimumStep = 33.6
     var speed = 1.0
     var duration = 0.18
     var excludedApps: Set<String> = []
@@ -28,15 +33,24 @@ struct MouseScrollConfiguration: Codable, Equatable, Sendable {
 
     var normalized: Self {
         var result = self
-        result.speed = speed.isFinite ? min(3, max(0.5, speed)) : 1
-        result.duration = duration.isFinite ? min(0.4, max(0.08, duration)) : 0.18
+        result.minimumStep = minimumStep.isFinite
+            ? min(Self.minimumStepRange.upperBound, max(Self.minimumStepRange.lowerBound, minimumStep)) : 33.6
+        result.speed = speed.isFinite ? min(Self.speedRange.upperBound, max(Self.speedRange.lowerBound, speed)) : 1
+        result.duration = duration.isFinite
+            ? min(Self.durationLevelRange.upperBound / 10, max(Self.durationLevelRange.lowerBound / 10, duration)) : 0.18
         return result
+    }
+
+    /// 界面使用无单位档位，偏好与动画继续使用秒，避免改变旧配置的单位。
+    var durationLevel: Double {
+        get { duration * 10 }
+        set { duration = newValue / 10 }
     }
 
     var multiplier: Double { normalized.speed * (reversed ? -1 : 1) }
 
     private enum CodingKeys: String, CodingKey {
-        case enabled, smooth, reversed, speed, duration, excludedApps, remoteCompatibility
+        case enabled, smooth, reversed, minimumStep, speed, duration, excludedApps, remoteCompatibility
     }
 }
 
@@ -46,6 +60,7 @@ extension MouseScrollConfiguration {
         enabled = try values.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
         smooth = try values.decodeIfPresent(Bool.self, forKey: .smooth) ?? true
         reversed = try values.decodeIfPresent(Bool.self, forKey: .reversed) ?? false
+        minimumStep = try values.decodeIfPresent(Double.self, forKey: .minimumStep) ?? 33.6
         speed = try values.decodeIfPresent(Double.self, forKey: .speed) ?? 1
         duration = try values.decodeIfPresent(Double.self, forKey: .duration) ?? 0.18
         excludedApps = try values.decodeIfPresent(Set<String>.self, forKey: .excludedApps) ?? []
@@ -125,8 +140,14 @@ struct MouseScrollProcessor {
         if context != input.context { cancel() }
         context = input.context
         guard configuration.smooth else { return .immediate }
-        horizontal.add(input.delta.x * configuration.multiplier, at: time)
-        vertical.add(input.delta.y * configuration.multiplier, at: time)
+        // 每轴先补足单次输入的最短距离，再应用速度和反向；零轴不产生额外滚动。
+        func enhanced(_ delta: Double) -> Double {
+            guard delta != 0 else { return 0 }
+            let magnitude = max(abs(delta), configuration.minimumStep)
+            return (delta < 0 ? -magnitude : magnitude) * configuration.multiplier
+        }
+        horizontal.add(enhanced(input.delta.x), at: time)
+        vertical.add(enhanced(input.delta.y), at: time)
         return .smooth
     }
 

@@ -18,7 +18,7 @@ let package = Package(
             name: "PasteMan",
             dependencies: ["PasteManCore", "FinderMenuCore", .product(name: "Sparkle", package: "Sparkle")],
             linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]),
-        .target(name: "FinderMenuCore"),
+        .target(name: "FinderMenuCore", resources: [.copy("Resources/OfficeTemplates")]),
         .executableTarget(name: "FinderExtension", dependencies: ["FinderMenuCore"]),
         .testTarget(name: "PasteManCoreTests", dependencies: ["PasteManCore"]),
         .testTarget(name: "PasteManTests", dependencies: ["PasteMan", "PasteManCore", "FinderMenuCore"]),

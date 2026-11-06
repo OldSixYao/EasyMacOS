@@ -43,12 +43,14 @@ public enum FinderOperations {
         else { throw FinderMenuError.invalidName }
     }
 
-    public static func createFile(suffix: String, in directory: URL) throws -> URL {
+    public static func createFile(suffix: String, in directory: URL, templateDirectory: URL? = nil) throws -> URL {
         let suffix = try FinderFileType.normalize(suffix)
+        // 先读取模板，失败时不得留下零字节办公文档。
+        let data = try FinderDocumentTemplates.data(for: suffix, resourceDirectory: templateDirectory)
         var number = 1
         while true {
             let name = "未命名" + (number == 1 ? "" : " \(number)") + "." + suffix
-            do { return try create(.newText, named: name, in: directory) }
+            do { return try write(data, named: name, in: directory) }
             catch FinderMenuError.itemExists {
                 guard number < Int.max else { throw FinderMenuError.itemExists }
                 number += 1
@@ -60,6 +62,10 @@ public enum FinderOperations {
     @discardableResult
     public static func create(_ action: FinderAction, named name: String, in directory: URL) throws -> URL {
         guard action.createsItem else { throw FinderMenuError.unsupportedAction }
+        return try write(FinderDocumentTemplates.data(for: URL(fileURLWithPath: name).pathExtension.lowercased()), named: name, in: directory)
+    }
+
+    private static func write(_ data: Data, named name: String, in directory: URL) throws -> URL {
         try validateName(name)
         var isDirectory: ObjCBool = false
         guard directory.isFileURL,
@@ -67,7 +73,7 @@ public enum FinderOperations {
         else { throw FinderMenuError.missingDirectory }
         let destination = directory.appendingPathComponent(name, isDirectory: false)
         do {
-            try Data().write(to: destination, options: .withoutOverwriting)
+            try data.write(to: destination, options: .withoutOverwriting)
         } catch let error as CocoaError where error.code == .fileWriteFileExists {
             throw FinderMenuError.itemExists
         }

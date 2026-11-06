@@ -4,12 +4,15 @@ import Testing
 
 @testable import PasteMan
 
-private func enabledMouse(smooth: Bool = true, reversed: Bool = false, speed: Double = 1) -> MouseScrollConfiguration {
+// 距离守恒用例显式关闭步长放大；默认 33.60 的行为由专门的保底用例覆盖。
+private func enabledMouse(smooth: Bool = true, reversed: Bool = false, speed: Double = 1,
+                          minimumStep: Double = 0.01) -> MouseScrollConfiguration {
     var configuration = MouseScrollConfiguration()
     configuration.enabled = true
     configuration.smooth = smooth
     configuration.reversed = reversed
     configuration.speed = speed
+    configuration.minimumStep = minimumStep
     return configuration
 }
 
@@ -19,6 +22,80 @@ private func wheel(x: Double = 0, y: Double = 40) -> MouseScrollInput {
 }
 
 @Suite("鼠标滚动计算") struct MouseScrollEngineTests {
+    @Test func defaultMinimumStepAmplifiesSmallInputsAndKeepsFractionalRemainders() {
+        var configuration = MouseScrollConfiguration()
+        configuration.enabled = true
+        #expect(configuration.minimumStep == 33.6)
+        var processor = MouseScrollProcessor(configuration: configuration, ownPID: 42)
+        var total = 0.0
+        for index in 0..<10 {
+            #expect(processor.receive(wheel(y: 8), at: Double(index)) == .smooth)
+            let output = processor.sample(at: Double(index) + 0.5)
+            #expect(output.x == 0)
+            total += output.y
+            #expect(!processor.hasPending)
+        }
+        #expect(abs(total - 336) < 1)
+    }
+
+    @Test func minimumStepIsAppliedPerNonzeroAxisBeforeGainAndReversal() {
+        for minimumStep in [0.01, 20, 33.6, 100] {
+            for speed in [0.5, 1, 2.2, 10] {
+                for reversed in [false, true] {
+                    for distance in [0, 0.001, minimumStep / 2, minimumStep, minimumStep * 2] {
+                        for direction in [-1.0, 1] {
+                            let configuration = enabledMouse(reversed: reversed, speed: speed, minimumStep: minimumStep)
+                            var processor = MouseScrollProcessor(configuration: configuration, ownPID: 42)
+                            #expect(processor.receive(wheel(x: -direction * distance, y: direction * 200), at: 0) == .smooth)
+                            let output = processor.sample(at: 1)
+                            let expectedX = distance == 0 ? 0 : -direction * max(distance, minimumStep) * configuration.multiplier
+                            #expect(abs(output.x - expectedX) < 1)
+                            #expect(abs(output.y - direction * 200 * configuration.multiplier) < 1)
+                        }
+                    }
+                }
+            }
+        }
+        var processor = MouseScrollProcessor(configuration: enabledMouse(minimumStep: 20), ownPID: 42)
+        _ = processor.receive(wheel(y: 8), at: 0)
+        #expect(processor.sample(at: 1) == MouseScrollVector(y: 20))
+    }
+
+    @Test func largestGainStepAndDurationAccumulateAndFinishAtEveryFrameRate() {
+        for frameRate in [30.0, 60, 120] {
+            var configuration = enabledMouse(speed: 10, minimumStep: 100)
+            configuration.durationLevel = 5
+            var processor = MouseScrollProcessor(configuration: configuration, ownPID: 42)
+            _ = processor.receive(wheel(x: -1, y: 1), at: 0)
+            _ = processor.receive(wheel(x: -1, y: 1), at: 0.01)
+            var total = MouseScrollVector.zero
+            for frame in 1...Int(frameRate) {
+                let output = processor.sample(at: Double(frame) / frameRate)
+                #expect(output.x <= 0 && output.y >= 0)
+                total.x += output.x
+                total.y += output.y
+            }
+            #expect(total == MouseScrollVector(x: -2000, y: 2000))
+            #expect(!processor.hasPending)
+        }
+    }
+
+    @Test func immediateModeIgnoresMinimumStepAndStepChangeCancelsAnimation() {
+        var configuration = enabledMouse(speed: 2, minimumStep: 20)
+        var processor = MouseScrollProcessor(configuration: configuration, ownPID: 42)
+        _ = processor.receive(wheel(y: 8), at: 0)
+        #expect(processor.sample(at: 1).y == 40)
+        _ = processor.receive(wheel(y: 8), at: 2)
+        configuration.minimumStep = 100
+        processor.configure(configuration)
+        #expect(!processor.hasPending && processor.sample(at: 3).isZero)
+        configuration.smooth = false
+        processor.configure(configuration)
+        #expect(processor.receive(wheel(y: 8), at: 4) == .immediate)
+        #expect(processor.configuration.multiplier == 2)
+        #expect(!processor.hasPending)
+    }
+
     @Test func smoothingIsIdenticalForBrowsersAndUnlistedApplications() {
         var reference: [MouseScrollVector]?
         for bundle in ["com.google.Chrome", "com.apple.Safari", "test.unlisted.player", "test.reader"] {
@@ -34,8 +111,8 @@ private func wheel(x: Double = 0, y: Double = 40) -> MouseScrollInput {
     }
 
     @Test func adaptiveResponsePreservesDistanceAcrossDurationAndSpeedSettings() {
-        for duration in [0.08, 0.18, 0.4] {
-            for speed in [0.5, 1, 2.2, 3] {
+        for duration in [0.1, 0.18, 0.5] {
+            for speed in [0.5, 1, 2.2, 3, 10] {
                 for distance in [2.0, 8, 40, 80, -2, -8, -40, -80] {
                     var configuration = enabledMouse(speed: speed)
                     configuration.duration = duration
@@ -52,6 +129,28 @@ private func wheel(x: Double = 0, y: Double = 40) -> MouseScrollInput {
                 }
             }
         }
+    }
+
+    @Test func durationLevelChangesAnimationProgressWithoutChangingDistance() {
+        var earlyDistances: [Double] = []
+        for level in [1.0, 1.8, 5.0] {
+            var configuration = enabledMouse()
+            configuration.durationLevel = level
+            var processor = MouseScrollProcessor(configuration: configuration, ownPID: 42)
+            #expect(processor.receive(wheel(y: 200), at: 0) == .smooth)
+            let early = processor.sample(at: 0.05).y
+            earlyDistances.append(early)
+            var total = early + processor.sample(at: 0.11).y
+            #expect(processor.hasPending == (level > 1))
+            total += processor.sample(at: 0.19).y
+            #expect(processor.hasPending == (level > 1.8))
+            total += processor.sample(at: 0.51).y
+            #expect(!processor.hasPending)
+            #expect(total == 200)
+        }
+        // 同一时间点，较短时长应已滚过更长距离，不能只验证最终位移。
+        #expect(earlyDistances[0] > earlyDistances[1])
+        #expect(earlyDistances[1] > earlyDistances[2])
     }
 
     @Test func ordinaryPageSmallWheelsAlwaysUseSmoothPixels() {
@@ -231,7 +330,7 @@ private func wheel(x: Double = 0, y: Double = 40) -> MouseScrollInput {
         remote.continuous = true
         #expect(processor.receive(remote, at: 0) == .smooth)
         let delta = processor.sample(at: 1)
-        #expect(delta == MouseScrollVector(x: 22, y: -44))
+        #expect(abs(delta.x - 33.6 * 2.2) < 1 && abs(delta.y + 33.6 * 2.2) < 1)
         remote.hasPhase = true
         #expect(processor.receive(remote, at: 2) == .passThrough)
         remote.hasPhase = false
@@ -260,6 +359,7 @@ private func wheel(x: Double = 0, y: Double = 40) -> MouseScrollInput {
         let configuration = try JSONDecoder().decode(MouseScrollConfiguration.self, from: data)
         #expect(configuration.enabled && !configuration.smooth && configuration.reversed)
         #expect(configuration.speed == 2.2 && configuration.duration == 0.27)
+        #expect(configuration.minimumStep == 33.6)
         #expect(configuration.excludedApps == ["test.excluded"])
         #expect(!configuration.remoteCompatibility)
         var processor = MouseScrollProcessor(configuration: configuration, ownPID: 42)
@@ -294,10 +394,31 @@ private func wheel(x: Double = 0, y: Double = 40) -> MouseScrollInput {
         var configuration = enabledMouse()
         configuration.speed = .nan
         configuration.duration = .infinity
+        configuration.minimumStep = -.infinity
         #expect(configuration.normalized.speed == 1 && configuration.normalized.duration == 0.18)
+        #expect(configuration.normalized.minimumStep == 33.6)
         configuration.speed = 20
         configuration.duration = -1
-        #expect(configuration.normalized.speed == 3 && configuration.normalized.duration == 0.08)
+        configuration.minimumStep = -1
+        #expect(configuration.normalized.speed == 10 && configuration.normalized.duration == 0.1)
+        #expect(configuration.normalized.minimumStep == 0.01)
+        configuration.speed = -1
+        configuration.duration = 20
+        configuration.minimumStep = 200
+        #expect(configuration.normalized.speed == 0.5 && configuration.normalized.duration == 0.5)
+        #expect(configuration.normalized.minimumStep == 100)
+        for boundary in [0.01, 100] {
+            configuration.minimumStep = boundary
+            #expect(configuration.normalized.minimumStep == boundary)
+        }
+        for boundary in [0.5, 10] {
+            configuration.speed = boundary
+            #expect(configuration.normalized.speed == boundary)
+        }
+        for level in [1.0, 1.8, 2.61, 5] {
+            configuration.durationLevel = level
+            #expect(abs(configuration.normalized.durationLevel - level) < 0.000_001)
+        }
         var quantizer = MouseScrollQuantizer()
         #expect(quantizer.scale(1, by: 0.5) == 0)
         #expect(quantizer.scale(1, by: 0.5) == 1)
@@ -421,6 +542,39 @@ private func wheel(x: Double = 0, y: Double = 40) -> MouseScrollInput {
 }
 
 @Suite("鼠标设置与服务", .serialized) @MainActor struct MouseScrollServiceTests {
+    @Test func invalidRuntimeParametersMatchPersistedAndDeliveredValuesWithoutDuplicateUpdates() throws {
+        let suite = "MouseScrollNormalization." + UUID().uuidString
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = AppSettings(defaults: defaults)
+        let driver = MockMouseScrollDriver()
+        let service = MouseScrollService(driver: driver, hasPermission: { true }, observesWorkspace: false)
+        service.start()
+        var delivered: [MouseScrollConfiguration] = []
+        settings.onMouseChanged = {
+            delivered.append(settings.mouse)
+            service.apply(settings.mouse)
+        }
+        defer { settings.onMouseChanged = nil; service.stop() }
+        settings.mouse.enabled = true
+        settings.mouse.speed = 20
+        #expect(settings.mouse.speed == 10)
+        #expect(delivered.last?.speed == 10)
+        #expect(driver.latest?.speed == 10)
+        #expect(driver.latest == settings.mouse)
+        #expect(AppSettings(defaults: defaults).mouse == settings.mouse)
+        let count = delivered.count
+        let updates = driver.updates
+        settings.mouse.speed = 100
+        #expect(delivered.count == count)
+        #expect(driver.updates == updates)
+        settings.mouse.minimumStep = -.infinity
+        settings.mouse.duration = .nan
+        #expect(settings.mouse.minimumStep == 33.6 && settings.mouse.duration == 0.18)
+        #expect(AppSettings(defaults: defaults).mouse == settings.mouse)
+        #expect(driver.latest == settings.mouse)
+    }
+
     @Test func defaultIsOffAndSettingsPersistSeparatelyFromClipboardExclusions() throws {
         let suite = "MouseScrollSettings." + UUID().uuidString
         let defaults = try #require(UserDefaults(suiteName: suite))
@@ -428,6 +582,7 @@ private func wheel(x: Double = 0, y: Double = 40) -> MouseScrollInput {
         let settings = AppSettings(defaults: defaults)
         #expect(!settings.mouse.enabled && settings.mouse.smooth && !settings.mouse.reversed)
         #expect(settings.mouse.speed == 1 && settings.mouse.duration == 0.18)
+        #expect(settings.mouse.minimumStep == 33.6)
         #expect(!settings.mouse.remoteCompatibility)
         settings.excludedApps = ["test.clipboard"]
         var changes = 0
@@ -435,15 +590,42 @@ private func wheel(x: Double = 0, y: Double = 40) -> MouseScrollInput {
         settings.mouse = enabledMouse(reversed: true, speed: 2)
         settings.mouse.excludedApps = ["test.scroll"]
         settings.mouse.remoteCompatibility = true
-        #expect(changes == 3)
+        settings.mouse.minimumStep = 42.01
+        settings.mouse.speed = 10
+        settings.mouse.durationLevel = 5
+        #expect(changes == 6)
         let restored = AppSettings(defaults: defaults)
         #expect(restored.mouse == settings.mouse)
         #expect(restored.excludedApps == ["test.clipboard"])
         restored.mouse = .init()
-        #expect(!AppSettings(defaults: defaults).mouse.enabled)
+        #expect(AppSettings(defaults: defaults).mouse == MouseScrollConfiguration())
         #expect(restored.excludedApps == ["test.clipboard"])
         defaults.set(Data("invalid".utf8), forKey: "mouseScrollConfiguration")
         #expect(AppSettings(defaults: defaults).mouse == .init())
+    }
+
+    @Test func legacyPreferencesClampDurationWithoutChangingItsStoredUnit() throws {
+        let suite = "MouseScrollLegacySettings." + UUID().uuidString
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        for oldDuration in [0.08, 0.18, 0.27, 0.4] {
+            defaults.set(Data("""
+                {"enabled":true,"smooth":true,"reversed":true,"speed":2.2,"duration":\(oldDuration),
+                 "excludedApps":["test.excluded"],"remoteCompatibility":true}
+                """.utf8), forKey: "mouseScrollConfiguration")
+            let settings = AppSettings(defaults: defaults)
+            #expect(settings.mouse.minimumStep == 33.6)
+            #expect(settings.mouse.speed == 2.2)
+            #expect(settings.mouse.duration == max(0.1, oldDuration))
+            #expect(settings.mouse.enabled && settings.mouse.reversed && settings.mouse.remoteCompatibility)
+            #expect(settings.mouse.excludedApps == ["test.excluded"])
+            settings.mouse.minimumStep = 0.01
+            let data = try #require(defaults.data(forKey: "mouseScrollConfiguration"))
+            let stored = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            #expect(stored["duration"] as? Double == max(0.1, oldDuration))
+            #expect(stored["minimumStep"] as? Double == 0.01)
+            #expect(AppSettings(defaults: defaults).mouse == settings.mouse)
+        }
     }
 
     @Test func startIsOptInAndOnlyReportsRunningAfterDriverAcknowledges() {

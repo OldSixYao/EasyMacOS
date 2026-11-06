@@ -1,4 +1,5 @@
 import Foundation
+import PDFKit
 import Testing
 
 @testable import FinderMenuCore
@@ -15,7 +16,8 @@ import Testing
         let migrated = try JSONDecoder().decode(FinderConfiguration.self, from: old)
         #expect(!migrated.enabled)
         #expect(migrated.disabledActions == ["copyName", "newText"])
-        #expect(migrated.fileTypes.map(\.suffix) == FinderConfiguration.defaultSuffixes)
+        #expect(migrated.fileTypes.map(\.suffix) == FinderConfiguration.legacySuffixes)
+        #expect(!migrated.officeTypesMigrated)
         var empty = FinderConfiguration()
         for type in empty.fileTypes { empty.removeFileType(id: type.id) }
         #expect(try JSONDecoder().decode(FinderConfiguration.self, from: JSONEncoder().encode(empty)) == empty)
@@ -24,7 +26,7 @@ import Testing
     @Test func normalizesDeduplicatesAndNeverReusesIDs() throws {
         var configuration = FinderConfiguration()
         try configuration.addFileType(" .TXT \n")
-        #expect(configuration.fileTypes.count == 8)
+        #expect(configuration.fileTypes.count == 12)
         try configuration.addFileType(" .Tar.GZ ")
         let custom = try #require(configuration.fileTypes.last)
         #expect(custom.suffix == "tar.gz")
@@ -93,7 +95,7 @@ import Testing
     @Test func createsAllDefaultsAndCompoundSuffixWithoutContents() throws {
         let root = try folder()
         defer { try? FileManager.default.removeItem(at: root) }
-        for suffix in FinderConfiguration.defaultSuffixes + ["tar.gz"] {
+        for suffix in FinderConfiguration.legacySuffixes + ["tar.gz"] {
             let file = try FinderOperations.createFile(suffix: suffix, in: root)
             #expect(file.lastPathComponent == "未命名." + suffix)
             #expect(try Data(contentsOf: file).isEmpty)
@@ -116,26 +118,74 @@ import Testing
         #expect(try existingDirectory.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true)
     }
 
-    @Test func concurrentCreatesProduceDistinctFiles() async throws {
+    @Test(arguments: ["json", "docx", "xlsx", "pptx", "pdf"]) func concurrentCreatesProduceDistinctFiles(_ suffix: String) async throws {
         let root = try folder()
         defer { try? FileManager.default.removeItem(at: root) }
         let files = try await withThrowingTaskGroup(of: URL.self) { group in
-            for _ in 0..<20 { group.addTask { try FinderOperations.createFile(suffix: "json", in: root) } }
+            for _ in 0..<20 { group.addTask { try FinderOperations.createFile(suffix: suffix, in: root) } }
             var files = Set<URL>()
             for try await file in group { files.insert(file) }
             return files
         }
         #expect(files.count == 20)
-        #expect(files.contains { $0.lastPathComponent == "未命名 20.json" })
-        for file in files { #expect(try Data(contentsOf: file).isEmpty) }
+        #expect(files.contains { $0.lastPathComponent == "未命名 20." + suffix })
+        let expected = try FinderDocumentTemplates.data(for: suffix)
+        for file in files { #expect(try Data(contentsOf: file) == expected) }
     }
 
-    @Test func writeFailureDoesNotRetryAsCollision() throws {
+    @Test(arguments: ["txt", "docx", "xlsx", "pptx", "pdf"]) func writeFailureDoesNotRetryAsCollision(_ suffix: String) throws {
         let root = try folder()
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
             try? FileManager.default.removeItem(at: root) }
         try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: root.path)
-        #expect(throws: (any Error).self) { try FinderOperations.createFile(suffix: "txt", in: root) }
+        #expect(throws: (any Error).self) { try FinderOperations.createFile(suffix: suffix, in: root) }
         #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+    }
+}
+
+extension FinderFileTypeTests {
+    @Test(arguments: FinderConfiguration.officeSuffixes) func officeTemplatesNeverOverwrite(_ suffix: String) throws {
+        let root = try folder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let expected = try FinderDocumentTemplates.data(for: suffix)
+        #expect(!expected.isEmpty)
+        let original = root.appendingPathComponent("未命名." + suffix)
+        try Data("保留原件".utf8).write(to: original)
+        let directory = root.appendingPathComponent("未命名 2." + suffix)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        let outside = root.appendingPathComponent("链接目标")
+        try Data("链接内容".utf8).write(to: outside)
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("未命名 3." + suffix), withDestinationURL: outside)
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("未命名 4." + suffix), withDestinationURL: root.appendingPathComponent("缺失目标"))
+        let created = try FinderOperations.createFile(suffix: suffix, in: root)
+        #expect(created.lastPathComponent == "未命名 5." + suffix)
+        #expect(try Data(contentsOf: created) == expected)
+        #expect(try String(contentsOf: original, encoding: .utf8) == "保留原件")
+        #expect(try String(contentsOf: outside, encoding: .utf8) == "链接内容")
+        #expect(try FinderOperations.createFile(suffix: suffix, in: root).lastPathComponent == "未命名 6." + suffix)
+    }
+
+    @Test(arguments: FinderConfiguration.officeSuffixes) func missingTemplateLeavesNoFile(_ suffix: String) throws {
+        let root = try folder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        #expect(throws: FinderMenuError.templateUnavailable) {
+            try FinderOperations.createFile(suffix: suffix, in: root, templateDirectory: root)
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+    }
+
+    @Test func blankPDFHasOneEmptyPage() throws {
+        let pdf = try #require(PDFDocument(data: FinderDocumentTemplates.data(for: "pdf")))
+        #expect(pdf.pageCount == 1)
+        #expect((pdf.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        #expect(pdf.page(at: 0)?.bounds(for: .mediaBox) == CGRect(x: 0, y: 0, width: 595, height: 842))
+    }
+
+    @Test(arguments: ["../other.png", "/tmp/other.png", "dir/a.png", "a\\b.png", "a:b.png", ".png", "a.jpg", ""]) func rejectsUnsafeIconReferences(_ resource: String) throws {
+        var configuration = FinderConfiguration()
+        #expect(throws: FinderMenuError.invalidFileType) { try configuration.setIconResource(resource, for: 1) }
+        var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(configuration)) as? [String: Any])
+        object["fileTypes"] = [["id": 1, "suffix": "txt", "iconResource": resource]]
+        #expect(throws: (any Error).self) { try JSONDecoder().decode(FinderConfiguration.self, from: JSONSerialization.data(withJSONObject: object)) }
     }
 }

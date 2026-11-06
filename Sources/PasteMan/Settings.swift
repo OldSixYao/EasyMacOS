@@ -19,8 +19,29 @@ struct Shortcut: Codable, Equatable {
 
 @MainActor @Observable final class AppSettings {
     private let defaults: UserDefaults
-    var retentionDays: Int { didSet { defaults.set(retentionDays, forKey: "retentionDays") } }
-    var historyLimit: Int { didSet { defaults.set(historyLimit, forKey: "historyLimit") } }
+    private var storedRetentionDays: Int
+    private var storedHistoryLimit: Int
+    @ObservationIgnored var onRetentionChanged: (() -> Void)?
+    var retentionDays: Int {
+        get { storedRetentionDays }
+        set {
+            let value = max(1, newValue)
+            guard storedRetentionDays != value else { return }
+            storedRetentionDays = value
+            defaults.set(value, forKey: "retentionDays")
+            onRetentionChanged?()
+        }
+    }
+    var historyLimit: Int {
+        get { storedHistoryLimit }
+        set {
+            let value = max(1, newValue)
+            guard storedHistoryLimit != value else { return }
+            storedHistoryLimit = value
+            defaults.set(value, forKey: "historyLimit")
+            onRetentionChanged?()
+        }
+    }
     var excludedApps: Set<String> { didSet { defaults.set(excludedApps.sorted(), forKey: "excludedApps") } }
     @ObservationIgnored var onClipboardChanged: (() -> Void)?
     @ObservationIgnored var onScreenshotChanged: (() -> Void)?
@@ -37,12 +58,17 @@ struct Shortcut: Codable, Equatable {
         }
     }
     @ObservationIgnored var onMouseChanged: (() -> Void)?
+    private var storedMouse: MouseScrollConfiguration
     var mouse: MouseScrollConfiguration {
-        didSet {
-            if let data = try? JSONEncoder().encode(mouse.normalized) {
+        get { storedMouse }
+        set {
+            let value = newValue.normalized
+            guard storedMouse != value else { return }
+            storedMouse = value
+            if let data = try? JSONEncoder().encode(value) {
                 defaults.set(data, forKey: "mouseScrollConfiguration")
             }
-            if oldValue != mouse { onMouseChanged?() }
+            onMouseChanged?()
         }
     }
     var shortcut: Shortcut {
@@ -72,12 +98,12 @@ struct Shortcut: Codable, Equatable {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        retentionDays = max(1, defaults.object(forKey: "retentionDays") as? Int ?? 30)
-        historyLimit = max(1, defaults.object(forKey: "historyLimit") as? Int ?? 500)
+        storedRetentionDays = max(1, defaults.object(forKey: "retentionDays") as? Int ?? 30)
+        storedHistoryLimit = max(1, defaults.object(forKey: "historyLimit") as? Int ?? 500)
         excludedApps = defaults.stringArray(forKey: "excludedApps").map(Set.init) ?? PrivacyPolicy.defaultExcludedApps
         clipboardEnabled = defaults.object(forKey: "clipboardEnabled") as? Bool ?? true
         screenshotEnabled = defaults.object(forKey: "screenshotEnabled") as? Bool ?? true
-        mouse = defaults.data(forKey: "mouseScrollConfiguration")
+        storedMouse = defaults.data(forKey: "mouseScrollConfiguration")
             .flatMap { try? JSONDecoder().decode(MouseScrollConfiguration.self, from: $0) }?.normalized ?? .init()
         shortcut =
             defaults.data(forKey: "shortcut").flatMap { try? JSONDecoder().decode(Shortcut.self, from: $0) } ?? .default

@@ -125,9 +125,21 @@ import Testing
         let types = try #require(menu.items.first?.submenu).items
         #expect(types.map(\.title) == FinderConfiguration.defaultSuffixes.map { "." + $0 })
         for (type, item) in zip(configuration.fileTypes, types) {
+            let image = try #require(item.image)
+            let data = try NSKeyedArchiver.archivedData(withRootObject: image, requiringSecureCoding: true)
+            let decoded = try #require(try NSKeyedUnarchiver.unarchivedObject(ofClass: NSImage.self, from: data))
+            #expect(!decoded.isTemplate)
+            #expect(decoded.representations.count == 2)
+            #expect(decoded.representations.allSatisfy { $0 is NSBitmapImageRep })
+            #expect(decoded.representations.compactMap { $0 as? NSBitmapImageRep }.allSatisfy { bitmap in
+                (0..<bitmap.pixelsWide).contains { x in
+                    (0..<bitmap.pixelsHigh).contains { y in (bitmap.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.1 }
+                }
+            })
             let command = try #require(FinderMenuCommand(tag: item.tag))
             #expect(command.usesTarget)
             #expect(command.fileTypeID == type.id)
+            #expect(try command.request(target: URL(fileURLWithPath: "/tmp"), selection: [], configuration: configuration).suffix == type.suffix)
         }
     }
 

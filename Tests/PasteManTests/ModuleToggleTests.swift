@@ -204,6 +204,59 @@ private actor ModulePreparation {
         #expect(try await f.store.list().isEmpty)
     }
 
+    @Test func retentionChangesApplyWithoutSettingsWindowAndPreserveFavorites() async throws {
+        let f = try ModuleFixture()
+        defer { f.clean() }
+        let now = Date()
+        for index in 0..<5 {
+            try await f.store.save(.text("历史参数检查 \(index)"), sourceBundleID: "test", sourceName: "合成应用",
+                policy: f.settings.policy, now: now.addingTimeInterval(Double(index - 5) * 86400))
+        }
+        let favorite = try #require(try await f.store.list().last)
+        try await f.store.setFavorite(favorite.id, value: true)
+        var refreshes = 0
+        f.monitor.onChange = { refreshes += 1 }
+        f.modules.start()
+        // 等待启动清理进入休眠，确保验证的是参数修改唤醒，而非启动清理。
+        try await Task.sleep(for: .milliseconds(100))
+        f.settings.historyLimit = 2
+        for _ in 0..<100 {
+            if try await f.store.list().count == 3 { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(try await f.store.list().count == 3)
+        f.settings.retentionDays = 1
+        for _ in 0..<100 {
+            if try await f.store.list().count == 1 { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(try await f.store.list().map(\.id) == [favorite.id])
+        #expect(refreshes == 2)
+        let restored = AppSettings(defaults: f.defaults)
+        #expect(restored.retentionDays == 1 && restored.historyLimit == 2)
+    }
+
+    @Test func retentionParametersNormalizeBeforeNotificationAndSkipUnchangedValues() throws {
+        let f = try ModuleFixture()
+        defer { f.clean() }
+        var changes = 0
+        f.settings.onRetentionChanged = {
+            changes += 1
+            #expect(f.settings.retentionDays >= 1 && f.settings.historyLimit >= 1)
+            #expect(f.defaults.integer(forKey: "retentionDays") == f.settings.retentionDays)
+        }
+        defer { f.settings.onRetentionChanged = nil }
+        f.settings.retentionDays = 0
+        f.settings.retentionDays = -1
+        f.settings.historyLimit = 0
+        f.settings.historyLimit = -1
+        #expect(changes == 2)
+        #expect(f.settings.retentionDays == 1 && f.settings.historyLimit == 1)
+        #expect(f.settings.policy.days == 1 && f.settings.policy.count == 1)
+        let restored = AppSettings(defaults: f.defaults)
+        #expect(restored.retentionDays == 1 && restored.historyLimit == 1)
+    }
+
     @Test func rapidDisableAndEnableDiscardsPendingImageAndScreenshotTickets() async throws {
         let preparation = ModulePreparation()
         let f = try ModuleFixture(prepare: { _ in await preparation.wait(); return .text("旧图片") })

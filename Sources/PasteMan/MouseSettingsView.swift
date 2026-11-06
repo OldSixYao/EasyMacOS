@@ -38,16 +38,24 @@ struct MouseSettingsView: View {
                     .help(L.t(
                         "Enable if a remote desktop sends mouse wheels as continuous scrolling. Trackpad gestures and momentum remain unchanged.",
                         "远程桌面将鼠标滚轮转换为连续滚动、导致增强无效时开启。触控板手势和惯性保持原样。"))
-                VStack(alignment: .leading, spacing: 6) {
-                    LabeledContent(L.t("Scroll speed", "滚动速度"), value: String(format: "%.1f×", settings.mouse.speed))
-                    Slider(value: $settings.mouse.speed, in: 0.5...3, step: 0.1)
-                        .accessibilityLabel(L.t("Scroll speed", "滚动速度"))
-                }
-                VStack(alignment: .leading, spacing: 6) {
-                    LabeledContent(L.t("Smoothing duration", "平滑时长"), value: "\(Int((settings.mouse.duration * 1000).rounded())) " + L.t("ms", "毫秒"))
-                    Slider(value: $settings.mouse.duration, in: 0.08...0.4, step: 0.01)
-                        .accessibilityLabel(L.t("Smoothing duration", "平滑时长"))
-                }.disabled(!settings.mouse.smooth)
+                MouseScrollParameterRow(
+                    title: L.t("Minimum step", "最短步长"),
+                    explanation: L.t("Minimum distance per wheel input, before speed gain, in pixels.", "单次滚动的最短距离，单位为像素，在速度增益之前生效。"),
+                    identifier: "mouse.minimumStep", value: $settings.mouse.minimumStep,
+                    range: MouseScrollConfiguration.minimumStepRange, defaultValue: 33.6
+                ).disabled(!settings.mouse.smooth)
+                MouseScrollParameterRow(
+                    title: L.t("Speed gain", "速度增益"),
+                    explanation: L.t("Multiplies the scrolling distance and following speed.", "调整滚动距离与跟随速度的倍率。"),
+                    identifier: "mouse.speed", value: $settings.mouse.speed,
+                    range: MouseScrollConfiguration.speedRange, defaultValue: 1
+                )
+                MouseScrollParameterRow(
+                    title: L.t("Smoothing duration", "平滑时长"),
+                    explanation: L.t("Controls easing duration. Each level equals 100 ms; 1–5 means 100–500 ms.", "控制滚动缓动时长，每单位为 100 毫秒，1～5 对应 100～500 毫秒。"),
+                    identifier: "mouse.duration", value: $settings.mouse.durationLevel,
+                    range: MouseScrollConfiguration.durationLevelRange, defaultValue: 1.8
+                ).disabled(!settings.mouse.smooth)
             } footer: {
                 if settings.mouse.remoteCompatibility {
                     Text(L.t(
@@ -84,6 +92,7 @@ struct MouseSettingsView: View {
                 Text(L.t("Excluded apps use native scrolling, including direction and speed.", "排除的应用使用原生滚动，包括原有方向与速度。"))
             }
             Button(L.t("Restore mouse defaults", "恢复鼠标默认设置")) { settings.mouse = .init() }
+                .accessibilityIdentifier("mouse.restoreDefaults")
         }
         .formStyle(.grouped)
         .alert(L.t("Invalid application", "应用标识无效"), isPresented: Binding(
@@ -124,4 +133,70 @@ struct MouseSettingsView: View {
             let bundle = Bundle(url: url)?.bundleIdentifier else { return }
         settings.mouse.excludedApps.insert(bundle)
     }
+}
+
+/// 输入草稿只在提交或失去焦点时写入配置，避免输入中间态中断滚动动画。
+private struct MouseScrollParameterRow: View {
+    let title: String
+    let explanation: String
+    let identifier: String
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let defaultValue: Double
+    @ViewState private var draft = ""
+    @FocusState private var editing: Bool
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text(title).frame(width: 104, alignment: .leading).padding(.top, 4)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    // 绑定负责量化到百分位，避免系统为上万个步进绘制密集刻度。
+                    Slider(value: boundedValue, in: range)
+                        .labelsHidden()
+                        .accessibilityLabel(title)
+                        .accessibilityIdentifier(identifier + ".slider")
+                    TextField(title, text: $draft)
+                        .labelsHidden()
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: 76)
+                        .focused($editing)
+                        .onSubmit { commit(); editing = false }
+                        .accessibilityLabel(title)
+                        .accessibilityIdentifier(identifier + ".value")
+                    Stepper(title, value: boundedValue, in: range, step: 0.01)
+                        .labelsHidden()
+                        .fixedSize()
+                        .accessibilityLabel(title)
+                        .accessibilityIdentifier(identifier + ".stepper")
+                }
+                Text(explanation)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .onAppear { refreshDraft() }
+        .onChange(of: value) { refreshDraft() }
+        .onChange(of: editing) { _, focused in if !focused { commit() } }
+    }
+
+    private var boundedValue: Binding<Double> {
+        Binding(get: { value }, set: { value = validated($0); refreshDraft() })
+    }
+
+    private func validated(_ candidate: Double) -> Double {
+        let finite = candidate.isFinite ? candidate : defaultValue
+        let bounded = min(range.upperBound, max(range.lowerBound, finite))
+        return (bounded * 100).rounded() / 100
+    }
+
+    private func commit() {
+        value = validated(Double(draft.trimmingCharacters(in: .whitespacesAndNewlines)) ?? defaultValue)
+        refreshDraft()
+    }
+
+    private func refreshDraft() { draft = String(format: "%.2f", value) }
 }

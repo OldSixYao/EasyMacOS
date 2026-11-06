@@ -135,7 +135,7 @@ private final class MouseEventTemplateCapture: @unchecked Sendable {
             #expect(small.count > 1)
             #expect(small.allSatisfy { ($0["precise"] as? Bool) == true })
             let distance = small.reduce(0.0) { $0 + (($1["y"] as? NSNumber)?.doubleValue ?? 0) }
-            #expect(abs(distance - Double(amount) * 10) < 1)
+            #expect(abs(distance - Double(amount) * configuration.minimumStep) < 1)
             #expect(small.allSatisfy { ($0["marker"] as? NSNumber)?.int64Value == MouseScrollEventAdapter.marker })
         }
 
@@ -158,7 +158,7 @@ private final class MouseEventTemplateCapture: @unchecked Sendable {
         #expect(remote.count > 1)
         #expect(remote.allSatisfy { ($0["marker"] as? NSNumber)?.int64Value == MouseScrollEventAdapter.marker })
         let remoteDistance = remote.reduce(0.0) { $0 + (($1["y"] as? NSNumber)?.doubleValue ?? 0) }
-        #expect(abs(remoteDistance + 52.8) < 1)
+        #expect(abs(remoteDistance + configuration.minimumStep * 2.2) < 1)
 
         for amount: Int32 in [8, -8] {
             let beforeSmallRemote = events().count
@@ -168,7 +168,7 @@ private final class MouseEventTemplateCapture: @unchecked Sendable {
             #expect(smallRemote.count > 1)
             #expect(smallRemote.allSatisfy { ($0["precise"] as? Bool) == true })
             let distance = smallRemote.reduce(0.0) { $0 + (($1["y"] as? NSNumber)?.doubleValue ?? 0) }
-            #expect(abs(distance + Double(amount) * 2.2) < 1)
+            #expect(abs(distance + (amount < 0 ? -1 : 1) * configuration.minimumStep * 2.2) < 1)
             #expect(smallRemote.allSatisfy { ($0["marker"] as? NSNumber)?.int64Value == MouseScrollEventAdapter.marker })
         }
 

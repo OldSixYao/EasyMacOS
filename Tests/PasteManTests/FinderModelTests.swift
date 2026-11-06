@@ -42,7 +42,14 @@ import Testing
         let model = FinderModel(store: FinderConfigurationStore(url: root.appendingPathComponent("menu.json")))
         let outputURL = URL(fileURLWithPath: output, isDirectory: true)
         try FileManager.default.createDirectory(at: outputURL, withIntermediateDirectories: true)
-        for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", NSAppearance.Name.darkAqua)] {
+        let previousLanguage = L.language
+        defer { InterfaceLocalization.shared.setLanguage(previousLanguage) }
+        for (name, appearance, language) in [("light", NSAppearance.Name.aqua, AppLanguage.simplifiedChinese),
+                ("dark", NSAppearance.Name.darkAqua, .simplifiedChinese), ("english", NSAppearance.Name.aqua, .english),
+                ("long-list", NSAppearance.Name.aqua, .simplifiedChinese), ("disabled", NSAppearance.Name.darkAqua, .simplifiedChinese)] {
+            InterfaceLocalization.shared.setLanguage(language)
+            if name == "long-list" { for index in 1...20 { _ = model.addFileType("custom-\(index)") } }
+            if name == "disabled" { model.setEnabled(false) }
             let view = NSHostingView(
                 rootView: FinderSettingsView(model: model)
                     .background(Color(nsColor: .windowBackgroundColor)))
@@ -58,6 +65,24 @@ import Testing
             view.cacheDisplay(in: view.bounds, to: bitmap)
             try #require(bitmap.representation(using: .png, properties: [:]))
                 .write(to: outputURL.appendingPathComponent("finder-\(name).png"))
+            if name == "long-list" {
+                func scrollView(in parent: NSView) -> NSScrollView? {
+                    if let scroll = parent as? NSScrollView { return scroll }
+                    return parent.subviews.lazy.compactMap { scrollView(in: $0) }.first
+                }
+                let scroll = try #require(scrollView(in: view))
+                let document = try #require(scroll.documentView)
+                #expect(document.frame.height > scroll.contentView.bounds.height)
+                scroll.contentView.scroll(to: NSPoint(x: 0, y: document.frame.height - scroll.contentView.bounds.height))
+                scroll.reflectScrolledClipView(scroll.contentView)
+                try await Task.sleep(for: .milliseconds(150))
+                view.layoutSubtreeIfNeeded()
+                #expect(scroll.contentView.bounds.minY > 0)
+                let bottom = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+                view.cacheDisplay(in: view.bounds, to: bottom)
+                try #require(bottom.representation(using: .png, properties: [:]))
+                    .write(to: outputURL.appendingPathComponent("finder-long-list-bottom.png"))
+            }
             window.contentView = nil
             window.close()
         }

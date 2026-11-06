@@ -33,8 +33,15 @@ struct FinderSettingsView: View {
             Section {
                 ForEach(model.configuration.fileTypes) { type in
                     HStack {
+                        Image(nsImage: FinderFileTypeIcon.image(for: type, store: model.iconStore, size: 24))
+                            .accessibilityHidden(true)
                         Text("." + type.suffix)
                         Spacer()
+                        Button(L.t("Choose Image", "选择图片")) { model.chooseIcon(id: type.id) }
+                            .accessibilityLabel(L.t("Choose icon for .", "选择图标 .") + type.suffix)
+                        Button(L.t("Default Icon", "恢复默认图标")) { model.restoreIcon(id: type.id) }
+                            .disabled(type.iconResource == nil)
+                            .accessibilityLabel(L.t("Restore default icon for .", "恢复默认图标 .") + type.suffix)
                         Button(L.t("Remove", "删除")) { model.removeFileType(id: type.id) }
                             .accessibilityLabel(L.t("Remove .", "删除 .") + type.suffix)
                     }

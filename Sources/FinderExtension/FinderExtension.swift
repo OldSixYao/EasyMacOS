@@ -53,6 +53,7 @@ import FinderSync
                 for type in configuration.fileTypes {
                     let child = NSMenuItem(title: "." + type.suffix, action: #selector(performMenuAction(_:)), keyEquivalent: "")
                     child.target = self
+                    child.image = FinderFileTypeIcon.image(for: type)
                     child.tag = FinderMenuCommand(action: action, usesTarget: usesTarget, fileTypeID: type.id).tag
                     child.isEnabled = item.isEnabled
                     types.addItem(child)

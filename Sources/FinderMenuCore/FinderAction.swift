@@ -67,11 +67,14 @@ public enum FinderAction: String, Codable, CaseIterable, Sendable, Identifiable 
 
 public enum FinderMenuError: Error, LocalizedError, Equatable {
     case invalidRequest, invalidName, invalidFileType, missingDirectory, ambiguousDirectory, itemExists, unsupportedAction
+    case templateUnavailable, invalidIcon
 
     public var errorDescription: String? { description(in: .simplifiedChinese) }
 
     public func description(in language: AppLanguage) -> String {
         switch self {
+        case .templateUnavailable: language.text("The blank document template could not be read. Reinstall the app and try again.", "无法读取空白文档模板，请重新安装应用后重试。")
+        case .invalidIcon: language.text("The selected image could not be read or converted.", "所选图片无法读取或转换，请选择有效的图片。")
         case .invalidFileType: language.text(
             "Enter a valid file suffix. Dot-separated suffixes are supported; avoid separators, colons, whitespace, control characters and overly long names.",
             "请输入有效后缀：支持点分隔的复合后缀，不能包含路径分隔符、冒号、空白或控制字符，且名称不能过长。")
