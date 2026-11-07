@@ -11,7 +11,7 @@ import Testing
     var reads = 0
     var snapshot: ClipboardSnapshot?
     func refreshClipboard() {}
-    func capture() -> ClipboardSnapshot? { reads += 1; return snapshot }
+    func capture(expectedChangeCount: Int) -> ClipboardSnapshot? { reads += 1; return snapshot }
 }
 
 private actor DelayedPreparation {
@@ -70,6 +70,19 @@ private actor DelayedPreparation {
         #expect(restored.width == 120 && restored.height == 80)
         let display = try await archive.display(maximumPixels: 30)
         #expect(display.width == 30 && display.height == 20)
+        let rawSample = try #require(ScreenshotPixelSampler(image: display))
+        let rawTop = try #require(rawSample.sample(at: CGPoint(x: 10, y: 2), pointSize: CGSize(width: 30, height: 20)))
+        let rawBottom = try #require(rawSample.sample(at: CGPoint(x: 10, y: 18), pointSize: CGSize(width: 30, height: 20)))
+        #expect(rawTop.blue > 240 && rawTop.red < 10)
+        #expect(rawBottom.red > 240 && rawBottom.blue < 10)
+        let unscaled = try await archive.display(maximumPixels: 500)
+        #expect(unscaled.width == base.width && unscaled.height == base.height)
+        let actual = try #require(unscaled.dataProvider?.data as Data?)
+        let expectedPixels = try #require(restored.dataProvider?.data as Data?)
+        for row in 0..<base.height {
+            #expect(actual.subdata(in: row * unscaled.bytesPerRow..<(row * unscaled.bytesPerRow + base.width * 4))
+                == expectedPixels.subdata(in: row * restored.bytesPerRow..<(row * restored.bytesPerRow + base.width * 4)))
+        }
         let compressed = PinnedImageStorage(png: original.png, pointSize: original.pointSize)
         let compressedDisplay = try await compressed.display(maximumPixels: 30)
         #expect(compressedDisplay.width == 30 && compressedDisplay.height == 20)
@@ -153,12 +166,12 @@ private actor DelayedPreparation {
         monitor.onError = { if ($0 as? StoreError) == .processingBusy { busy += 1 } }
         board.changeCount += 1
         board.snapshot = .image(Data([1]))
-        monitor.enqueueCapture()
+        await monitor.enqueueCapture()
         while !(await gate.started) { await Task.yield() }
         for index in 0..<10 {
             board.changeCount += 1
             board.snapshot = .text("待处理 \(index)")
-            monitor.enqueueCapture()
+            await monitor.enqueueCapture()
         }
         #expect(monitor.pendingCaptureCount == 8)
         #expect(busy == 2)
@@ -186,17 +199,17 @@ private actor DelayedPreparation {
             sourceApplication: { ("test", "应用") }, prepareImage: { _ in await gate.wait(); return .text("处理完成") })
         board.snapshot = .image(Data(repeating: 1, count: 20 * 1024 * 1024))
         board.changeCount += 1
-        monitor.enqueueCapture()
+        await monitor.enqueueCapture()
         while !(await gate.started) { await Task.yield() }
         #expect(monitor.retainedCaptureBytes == 20 * 1024 * 1024)
         board.snapshot = .text(String(repeating: "x", count: 12 * 1024 * 1024))
         board.changeCount += 1
-        monitor.enqueueCapture()
+        await monitor.enqueueCapture()
         #expect(monitor.retainedCaptureBytes == 32 * 1024 * 1024)
         let reads = board.reads
         board.snapshot = .text("满载时不应读取，也不应事后补录")
         board.changeCount += 1
-        monitor.enqueueCapture()
+        await monitor.enqueueCapture()
         #expect(board.reads == reads)
         settings.paused = true
         monitor.recordingStateChanged()
@@ -251,6 +264,45 @@ private actor DelayedPreparation {
         pins.applyMemoryPressure(.normal)
         await pins.waitForDisplays()
         #expect(pins.cachedDisplayByteCount <= 32 * 1024 * 1024)
+    }
+
+    @Test func settledSmallPinReleasesOversizedPixelsAndCanceledShrinkKeepsSharpImage() async throws {
+        _ = NSApplication.shared
+        let context = try #require(CGContext(data: nil, width: 3840, height: 2160, bitsPerComponent: 8,
+            bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.setFillColor(CGColor(red: 0.3, green: 0.7, blue: 0.9, alpha: 0.5))
+        context.fill(CGRect(x: 0, y: 0, width: 3840, height: 2160))
+        let archive = try await PinnedImageWorker.shared.archive(base: #require(context.makeImage()),
+            pointSize: CGSize(width: 200, height: 112.5), annotations: [])
+        let pins = PinnedScreenshotManager(presentWindow: { _ in })
+        defer { pins.closeAll() }
+        pins.show(archive, sourceID: "test", sourceName: "应用", origin: nil)
+        let window = try #require(pins.windows.first)
+        let large = CGSize(width: 1200, height: 675)
+        let small = CGSize(width: 200, height: 112.5)
+        window.setContentSize(large)
+        await pins.waitForDisplays()
+        let largeBytes = pins.cachedDisplayByteCount
+        let decodes = pins.displayDecodeCount
+        #expect(largeBytes > 2 * 1024 * 1024)
+        let bitmap = try #require(window.contentView?.layer?.contents) as AnyObject
+        window.setContentSize(small)
+        await Task.yield()
+        window.setContentSize(large)
+        await pins.waitForDisplays()
+        #expect(window.contentView?.layer?.contents as AnyObject? === bitmap)
+        #expect(pins.displayDecodeCount == decodes)
+        window.setContentSize(small)
+        await pins.waitForDisplays()
+        #expect(pins.cachedDisplayByteCount < largeBytes / 4)
+        #expect(pins.cachedDisplayByteCount <= 1024 * 1024)
+        #expect(pins.displayDecodeCount == decodes + 1)
+        let contents = try #require(window.contentView?.layer?.contents) as! CGImage
+        let pixels = try #require(contents.dataProvider?.data as Data?)
+        #expect(abs(Int(pixels[3]) - 128) <= 2)
+        let original = try await archive.loadImage()
+        #expect(original.width == 3840 && original.height == 2160)
     }
 
     @Test func keyboardSelectionCrossesPagesWithoutLosingItems() async throws {

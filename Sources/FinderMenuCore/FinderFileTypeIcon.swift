@@ -63,8 +63,24 @@ public struct FinderFileTypeIconStore: Sendable {
 public enum FinderFileTypeIcon {
     /// 菜单跨进程传递时使用实体位图；彩色图标不能带模板着色标记。
     public static func image(for type: FinderFileType, store: FinderFileTypeIconStore = FinderFileTypeIconStore(), size: Int = 18) -> NSImage {
-        let custom = type.iconResource.flatMap { store.image(resource: $0) }
+        let size = min(128, max(1, size))
+        let appearance = NSAppearance.currentDrawing().name.rawValue
+            + (UserDefaults.standard.string(forKey: "AppleInterfaceStyle") ?? "Light")
         let style = defaultStyle(for: type.suffix)
+        let defaultKey = "default:\(style.symbol):\(size):\(appearance)"
+        var key = defaultKey
+        var custom: NSImage?
+        if let resource = type.iconResource, let url = store.url(for: resource),
+            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) {
+            // 自定义资源由应用独立保存；替换、修改或删除后不能继续显示旧像素。
+            let modified = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+            let fingerprint = "\(attributes[.systemFileNumber] ?? ""):\(attributes[.size] ?? ""):\(modified)"
+            let customKey = "\(url.path):\(fingerprint):\(size):\(appearance)"
+            if let cached = FinderFileTypeIconCache.shared.images.object(forKey: customKey as NSString) { return cached }
+            custom = store.image(resource: resource)
+            if custom != nil { key = customKey }
+        }
+        if let cached = FinderFileTypeIconCache.shared.images.object(forKey: key as NSString) { return cached }
         let source = custom ?? NSImage(systemSymbolName: style.symbol, accessibilityDescription: nil)
         let image = NSImage(size: NSSize(width: size, height: size))
         for scale in [1, 2] {
@@ -91,6 +107,7 @@ public enum FinderFileTypeIcon {
             image.addRepresentation(bitmap)
         }
         image.isTemplate = false
+        FinderFileTypeIconCache.shared.images.setObject(image, forKey: key as NSString, cost: size * size * 20)
         return image
     }
 
@@ -110,5 +127,28 @@ public enum FinderFileTypeIcon {
         case "js": ("curlybraces.square", .systemYellow)
         default: ("doc", .systemGray)
         }
+    }
+}
+
+/// NSCache 支持并发访问；发布的实体位图生成后不再修改，宿主和扩展各自限制缓存容量。
+private final class FinderFileTypeIconCache: @unchecked Sendable {
+    static let shared = FinderFileTypeIconCache()
+    let images = NSCache<NSString, NSImage>()
+    private init() {
+        images.countLimit = 128
+        images.totalCostLimit = 4 * 1024 * 1024
+    }
+}
+
+public actor FinderIconImportWorker {
+    public static let shared = FinderIconImportWorker()
+    public func importImage(at url: URL, store: FinderFileTypeIconStore) throws -> String {
+        try Task.checkCancellation()
+        let resource = try autoreleasepool { try store.importImage(at: url) }
+        if Task.isCancelled {
+            store.remove(resource: resource)
+            throw CancellationError()
+        }
+        return resource
     }
 }

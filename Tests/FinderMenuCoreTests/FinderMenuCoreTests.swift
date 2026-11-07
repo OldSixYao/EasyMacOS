@@ -107,6 +107,20 @@ private func temporaryDirectory() throws -> URL {
         #expect(!FileManager.default.fileExists(atPath: outside.path))
     }
 
+    @Test func directoryRejectsDeletedItemsAndDanglingLinksDespiteCachedMetadata() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let item = try FinderOperations.create(.newText, named: "将被删除.txt", in: root)
+        _ = try item.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
+        #expect(try FinderOperations.directory(for: [item]) == root.standardizedFileURL)
+        let link = root.appendingPathComponent("链接")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: item)
+        #expect(try FinderOperations.directory(for: [link]) == root.standardizedFileURL)
+        try FileManager.default.removeItem(at: item)
+        #expect(throws: FinderMenuError.missingDirectory) { try FinderOperations.directory(for: [item]) }
+        #expect(throws: FinderMenuError.missingDirectory) { try FinderOperations.directory(for: [link]) }
+    }
+
     @Test func directoryLinksAndApplicationPackagesUseTheExpectedLocation() throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

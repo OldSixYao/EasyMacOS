@@ -13,7 +13,7 @@ import Testing
     var snapshot: ClipboardSnapshot?
     var reads = 0
     func refreshClipboard() {}
-    func capture() -> ClipboardSnapshot? { reads += 1; return snapshot }
+    func capture(expectedChangeCount: Int) -> ClipboardSnapshot? { reads += 1; return snapshot }
     func copy(_ value: ClipboardSnapshot) { changeCount += 1; snapshot = value }
 }
 
@@ -271,7 +271,7 @@ private actor ModulePreparation {
         }
         #expect(await preparation.started)
         f.board.copy(.text("排队内容"))
-        f.monitor.enqueueCapture()
+        await f.monitor.enqueueCapture()
         f.settings.clipboardEnabled = false
         #expect(f.monitor.pendingCaptureCount == 0)
         f.settings.clipboardEnabled = true

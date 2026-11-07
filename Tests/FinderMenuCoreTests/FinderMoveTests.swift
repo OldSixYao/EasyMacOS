@@ -5,8 +5,8 @@ import Testing
 
 @Suite("访达剪切核心") struct FinderMoveTests {
     @Test func fixedActionIDsAndCutTagsAreIndependentOfMenuOrder() throws {
-        #expect(FinderAction.allCases.map(\.commandID) == [1, 2, 3, 4, 5, 6])
-        #expect(FinderAction.menuOrder == [.newText, .cut, .pasteMove, .copyPath, .copyName, .openTerminal])
+        #expect(FinderAction.allCases.map(\.commandID) == [1, 2, 3, 4, 5, 6, 7])
+        #expect(FinderAction.menuOrder == [.newText, .cut, .pasteMove, .copyPath, .copyName, .openTerminal, .toggleHiddenFiles])
         for id in [1, 2, 57, FinderCutState.maximumCommandID] {
             for usesTarget in [false, true] {
                 let command = FinderMenuCommand(action: .pasteMove, usesTarget: usesTarget, cutCommandID: id)

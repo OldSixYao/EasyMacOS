@@ -77,7 +77,7 @@ func press(_ element: AXUIElement) throws {
     }
 }
 
-@MainActor func invokeFinderMenu(_ title: String, in directory: URL, selection: [URL]? = nil) async throws {
+@MainActor func invokeFinderMenu(_ title: String, in directory: URL, selection: [URL]? = nil, fileType: Bool = false) async throws {
     NSWorkspace.shared.open(directory)
     guard let finder = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first else {
         throw FinderSmokeError(description: "访达未运行。")
@@ -143,14 +143,15 @@ func press(_ element: AXUIElement) throws {
     guard let menu else { throw FinderSmokeError(description: "未找到访达右键菜单。") }
     defer { AXUIElementPerformAction(menu, kAXCancelAction as CFString) }
     // 扩展菜单晚于系统菜单异步加入，不能在菜单刚出现时就断言缺少扩展项目。
-    let requestedTitle = title.hasPrefix(".") ? "新建文件" : title
+    let requestedTitle = fileType ? "新建文件" : title
     for _ in 0..<100 {
         if children(menu).contains(where: { attribute($0, kAXTitleAttribute) as? String == requestedTitle }) { break }
         try await Task.sleep(for: .milliseconds(50))
     }
     let topItems = children(menu)
     let expectedTitles = CommandLine.arguments.contains("--terminal-only") || CommandLine.arguments.contains("--move-only")
-        ? [requestedTitle] : ["新建文件", "复制完整路径", "复制文件名", "在此处打开终端", "访达菜单设置…"]
+        || CommandLine.arguments.contains("--hidden-only")
+        ? [requestedTitle] : ["新建文件", "复制完整路径", "复制文件名", "在此处打开终端", "显示／隐藏隐藏文件"]
     for expected in expectedTitles {
         guard topItems.contains(where: { attribute($0, kAXTitleAttribute) as? String == expected }) else {
             throw FinderSmokeError(description: "一级菜单缺少：\(expected)，请启用扩展并保留默认操作。当前项目：\(topItems.compactMap { attribute($0, kAXTitleAttribute) as? String })")
@@ -159,7 +160,7 @@ func press(_ element: AXUIElement) throws {
     guard !topItems.contains(where: { attribute($0, kAXTitleAttribute) as? String == "EasyMacOS" }) else {
         throw FinderSmokeError(description: "仍存在旧的外层子菜单。")
     }
-    if title.hasPrefix(".") {
+    if fileType {
         let creation = topItems.first { attribute($0, kAXTitleAttribute) as? String == "新建文件" }!
         try press(creation)
         guard let type = find(creation, role: kAXMenuItemRole, title: title) else {
@@ -244,6 +245,60 @@ func press(_ element: AXUIElement) throws {
     print("通过：一次菜单点击只打开一个终端窗口，工作目录正确，用户剪贴板未改变。")
 }
 
+@MainActor func checkHiddenFiles(in directory: URL) async throws {
+    let name = ".EasyMacOS-hidden-" + UUID().uuidString + ".txt"
+    try Data().write(to: directory.appendingPathComponent(name))
+    NSWorkspace.shared.open(directory)
+    guard let finder = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first else {
+        throw FinderSmokeError(description: "访达未运行。")
+    }
+    let application = AXUIElementCreateApplication(finder.processIdentifier)
+    var target: AXUIElement?
+    for _ in 0..<100 {
+        target = (attribute(application, kAXWindowsAttribute) as? [AXUIElement] ?? []).first {
+            attribute($0, kAXTitleAttribute) as? String == directory.lastPathComponent
+        }
+        if target != nil { break }
+        try await Task.sleep(for: .milliseconds(50))
+    }
+    guard let window = target else { throw FinderSmokeError(description: "未找到隐藏文件验证目录窗口。") }
+    defer {
+        if let close = attribute(window, kAXCloseButtonAttribute), CFGetTypeID(close) == AXUIElementGetTypeID() {
+            _ = AXUIElementPerformAction(unsafeDowncast(close, to: AXUIElement.self), kAXPressAction as CFString)
+        }
+    }
+    // 名称可能由文本框、单元格或静态文字报告，仅遍历本次合成目录窗口。
+    func visible(_ node: AXUIElement, depth: Int = 0) -> Bool {
+        guard depth < 20 else { return false }
+        if [kAXTitleAttribute, kAXValueAttribute, kAXDescriptionAttribute].contains(where: {
+            attribute(node, $0) as? String == name
+        }) { return true }
+        return children(node).contains { visible($0, depth: depth + 1) }
+    }
+    let original = visible(window)
+    func waitForVisibility(_ expected: Bool) async throws {
+        for _ in 0..<60 {
+            if visible(window) == expected { return }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        throw FinderSmokeError(description: "点击真实菜单后隐藏文件的可见性未按预期改变。")
+    }
+    do {
+        try await invokeFinderMenu("显示／隐藏隐藏文件", in: directory)
+        try await waitForVisibility(!original)
+        try await invokeFinderMenu("显示／隐藏隐藏文件", in: directory)
+        try await waitForVisibility(original)
+    } catch {
+        // 已观察到状态改变时尽力恢复，不盲目再次切换。
+        if visible(window) != original {
+            try? await invokeFinderMenu("显示／隐藏隐藏文件", in: directory)
+            try? await waitForVisibility(original)
+        }
+        throw error
+    }
+    print("通过：安装版本真实菜单切换隐藏合成文件，并恢复原显示状态。")
+}
+
 @MainActor func runSmoke() async throws {
     guard AXIsProcessTrusted() else { throw FinderSmokeError(description: "验证终端尚无辅助功能权限；未请求或修改权限。") }
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("EasyMacOS访达检查-' 空格-" + UUID().uuidString)
@@ -256,6 +311,10 @@ func press(_ element: AXUIElement) throws {
         running.bundleURL?.standardizedFileURL == appURL,
         NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).count == 1
     else { throw FinderSmokeError(description: "请先运行且仅运行指定路径的待验证应用。") }
+    if CommandLine.arguments.contains("--hidden-only") {
+        try await checkHiddenFiles(in: root)
+        return
+    }
     if CommandLine.arguments.contains("--terminal-only") {
         for _ in 0..<2 { try await checkTerminal(in: root) }
         return
@@ -272,7 +331,7 @@ func press(_ element: AXUIElement) throws {
             let original = root.appendingPathComponent("未命名." + suffix)
             try Data("需要保留的原内容".utf8).write(to: original)
             for number in 2...3 {
-                try await invokeFinderMenu("." + suffix, in: root)
+                try await invokeFinderMenu(suffix, in: root, fileType: true)
                 let output = root.appendingPathComponent("未命名 \(number)." + suffix)
                 for _ in 0..<100 {
                     if FileManager.default.fileExists(atPath: output.path) { break }
@@ -314,7 +373,7 @@ func press(_ element: AXUIElement) throws {
     guard !(expectRename && expectFallback) else { throw FinderSmokeError(description: "不能同时要求授权和未授权分支。") }
 
     func invoke() async throws {
-        if contextMenu { try await invokeFinderMenu(".txt", in: root) }
+        if contextMenu { try await invokeFinderMenu("txt", in: root, fileType: true) }
         else {
             var components = URLComponents()
             components.scheme = "easymacos"

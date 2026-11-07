@@ -15,7 +15,7 @@ import Testing
     var types: Set<String> = ["public.utf8-plain-text"]
     var snapshot: ClipboardSnapshot? = .text("initial")
     var reads = 0
-    func capture() -> ClipboardSnapshot? {
+    func capture(expectedChangeCount: Int) -> ClipboardSnapshot? {
         reads += 1
         return snapshot
     }
@@ -280,7 +280,7 @@ import Testing
         }
     }
 
-    @Test func namedPasteboardChoosesImageBeforeTextAndSkipsFiles() throws {
+    @Test func namedPasteboardChoosesImageBeforeTextAndSkipsFiles() async throws {
         let board = NSPasteboard.withUniqueName()
         defer { board.releaseGlobally() }
         let clipboard = SystemClipboard(pasteboard: board)
@@ -288,7 +288,7 @@ import Testing
         item.setString("caption", forType: .string)
         item.setData(Data([1, 2, 3]), forType: .png)
         board.writeObjects([item])
-        guard case .image(let data) = clipboard.capture() else {
+        guard case .image(let data) = await clipboard.capture(expectedChangeCount: board.changeCount) else {
             Issue.record("Image should take precedence")
             return
         }
@@ -298,13 +298,13 @@ import Testing
         file.setString("file:///tmp/private.txt", forType: .fileURL)
         file.setString("/tmp/private.txt", forType: .string)
         board.writeObjects([file])
-        #expect(clipboard.capture() == nil)
+        #expect(await clipboard.capture(expectedChangeCount: board.changeCount) == nil)
         board.clearContents()
         #expect(clipboard.write(.text("  中文\nline  ")))
         #expect(board.string(forType: .string) == "  中文\nline  ")
     }
 
-    @Test func firstSupportedItemIsUsedAndSettingsPersist() throws {
+    @Test func firstSupportedItemIsUsedAndSettingsPersist() async throws {
         let board = NSPasteboard.withUniqueName()
         defer { board.releaseGlobally() }
         let first = NSPasteboardItem()
@@ -314,7 +314,7 @@ import Testing
         let third = NSPasteboardItem()
         third.setString("later", forType: .string)
         board.writeObjects([first, second, third])
-        guard case .text(let text) = SystemClipboard(pasteboard: board).capture() else {
+        guard case .text(let text) = await SystemClipboard(pasteboard: board).capture(expectedChangeCount: board.changeCount) else {
             Issue.record("Expected text")
             return
         }

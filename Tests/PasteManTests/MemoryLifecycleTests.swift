@@ -68,7 +68,7 @@ private func syntheticImage(width: Int, height: Int) throws -> CGImage {
     var types: Set<String> = []
     var allowsMonitoring = true
     func refreshClipboard() {}
-    func capture() -> ClipboardSnapshot? { nil }
+    func capture(expectedChangeCount: Int) -> ClipboardSnapshot? { nil }
 }
 
 @MainActor private final class MemoryFixture {

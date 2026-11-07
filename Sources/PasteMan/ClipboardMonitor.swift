@@ -10,6 +10,8 @@ import PasteManCore
     private let prepareImage: @Sendable (Data) async throws -> PreparedContent
     private var gate: CaptureGate
     private var generation = 0
+    private var sourceRevision = 0
+    private var reading = false
     private var screenshotGeneration = 0
     private var monitoringEnabled: Bool
     private var task: Task<Void, Never>?
@@ -84,7 +86,7 @@ import PasteManCore
                 guard let interval = self?.pollInterval else { return }
                 do { try await Task.sleep(for: interval) } catch { return }
                 guard !Task.isCancelled, let self else { return }
-                self.enqueueCapture()
+                await self.enqueueCapture()
             }
         }
     }
@@ -110,6 +112,7 @@ import PasteManCore
         // 切换前尚未检测的内容无法再确认来源，不按新前台应用回填。
         // 已捕获的图片已有确定来源，显式截图也携带来源，不能因切换而取消。
         gate.reset(to: clipboard.changeCount)
+        sourceRevision += 1
     }
 
     /// The caller synchronously resets the baseline immediately after its successful write.
@@ -147,12 +150,12 @@ import PasteManCore
     }
 
     func poll() async {
-        guard let capture = takeCapture() else { return }
+        guard let capture = await takeCapture() else { return }
         await process(capture)
     }
 
-    private func takeCapture(canRead: Bool = true) -> Capture? {
-        guard settings.clipboardEnabled else { return nil }
+    private func takeCapture(canRead: Bool = true) async -> Capture? {
+        guard settings.clipboardEnabled, !reading, !Task.isCancelled else { return nil }
         permissions.refreshClipboard()
         let enabled = sessionActive && settings.clipboardEnabled && settings.hasOnboarded && !settings.paused && permissions.allowsMonitoring
         let captureCount = clipboard.changeCount
@@ -168,22 +171,32 @@ import PasteManCore
         else { return nil }
         // 满载时先消耗变更计数，不再向来源应用同步索取完整图片。
         guard canRead else { onError?(StoreError.processingBusy); return nil }
-        guard let snapshot = clipboard.capture(), clipboard.changeCount == captureCount else { return nil }
+        let version = generation
+        let sourceVersion = sourceRevision
+        let date = Date()
+        reading = true
+        defer { reading = false }
+        guard let snapshot = await clipboard.capture(expectedChangeCount: captureCount) else { return nil }
+        permissions.refreshClipboard()
+        guard !Task.isCancelled, generation == version, sourceRevision == sourceVersion,
+            clipboard.changeCount == captureCount, settings.clipboardEnabled, sessionActive,
+            settings.hasOnboarded, !settings.paused, permissions.allowsMonitoring,
+            !settings.excludedApps.contains(sourceID) else { return nil }
         let bytes: Int
         switch snapshot {
         case .image(let data): bytes = data.count
         case .text(let value): bytes = value.utf8.count
         }
-        return Capture(snapshot: snapshot, sourceID: sourceID, sourceName: app.name, date: Date(), generation: generation, bytes: bytes)
+        return Capture(snapshot: snapshot, sourceID: sourceID, sourceName: app.name, date: date, generation: version, bytes: bytes)
     }
     var isPolling: Bool { task != nil }
     var isCleanupScheduled: Bool { cleanupTask != nil }
     var pendingCaptureCount: Int { pending.count }
     var retainedCaptureBytes: Int { queuedBytes + processingBytes }
-    func enqueueCapture() {
+    func enqueueCapture() async {
         let available = 32 * 1024 * 1024 - retainedCaptureBytes
-        guard let capture = takeCapture(canRead: pending.count < 8 && available > 0) else { return }
-        guard capture.bytes <= available else {
+        guard let capture = await takeCapture(canRead: pending.count < 8 && available > 0) else { return }
+        guard pending.count < 8, capture.bytes <= 32 * 1024 * 1024 - retainedCaptureBytes else {
             onError?(StoreError.processingBusy)
             return
         }

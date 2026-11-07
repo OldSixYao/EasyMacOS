@@ -1,9 +1,9 @@
 import Foundation
 
 public enum FinderAction: String, Codable, CaseIterable, Sendable, Identifiable {
-    case newText, copyPath, copyName, openTerminal, cut, pasteMove
+    case newText, copyPath, copyName, openTerminal, cut, pasteMove, toggleHiddenFiles
 
-    public static let menuOrder: [Self] = [.newText, .cut, .pasteMove, .copyPath, .copyName, .openTerminal]
+    public static let menuOrder: [Self] = [.newText, .cut, .pasteMove, .copyPath, .copyName, .openTerminal, .toggleHiddenFiles]
 
     // 动作编号与显示顺序分离，已发布菜单的编号不能随增删动作变化。
     public var commandID: Int {
@@ -14,6 +14,7 @@ public enum FinderAction: String, Codable, CaseIterable, Sendable, Identifiable 
         case .openTerminal: 4
         case .cut: 5
         case .pasteMove: 6
+        case .toggleHiddenFiles: 7
         }
     }
 
@@ -29,6 +30,7 @@ public enum FinderAction: String, Codable, CaseIterable, Sendable, Identifiable 
         case .openTerminal: language.text("Open Terminal Here", "在此处打开终端")
         case .cut: language.text("Cut", "剪切")
         case .pasteMove: language.text("Paste (Move)", "粘贴（移动）")
+        case .toggleHiddenFiles: language.text("Show/Hide Hidden Files", "显示／隐藏隐藏文件")
         }
     }
 
@@ -40,6 +42,7 @@ public enum FinderAction: String, Codable, CaseIterable, Sendable, Identifiable 
         case .openTerminal: "打开所选文件夹，或文件所在的目录。"
         case .cut: "标记所选文件，在目标目录使用粘贴（移动）或 ⌥⌘V。"
         case .pasteMove: "由访达移动已剪切的文件，沿用系统冲突处理与撤销。"
+        case .toggleHiddenFiles: "切换访达隐藏文件的显示状态，等同于 ⇧⌘.，需要辅助功能权限。"
         }
     }
 
@@ -51,6 +54,7 @@ public enum FinderAction: String, Codable, CaseIterable, Sendable, Identifiable 
         case .openTerminal: "terminal"
         case .cut: "scissors"
         case .pasteMove: "doc.on.clipboard"
+        case .toggleHiddenFiles: "eye"
         }
     }
 

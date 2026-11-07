@@ -18,6 +18,8 @@ import FinderMenuCore
             case .openTerminal:
                 let directory = try await FinderFileWorker.shared.directory(for: request.items)
                 try FinderTerminalService().open(directory: directory)
+            case .toggleHiddenFiles:
+                try await FinderHiddenFilesCoordinator().toggle()
             case .copyPath, .copyName:
                 let value = try FinderOperations.clipboardText(for: request.action, items: request.items)
                 NSPasteboard.general.clearContents()

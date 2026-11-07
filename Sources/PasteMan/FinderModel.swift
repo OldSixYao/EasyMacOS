@@ -9,9 +9,15 @@ import Observation
     private(set) var automaticRenameEnabled = FinderRenameAccess.isGranted
     var message: String?
     private let store: FinderConfigurationStore
+    private let importIconResource: @Sendable (URL, FinderFileTypeIconStore) async throws -> String
+    @ObservationIgnored private var iconImports: [Int: UUID] = [:]
 
-    init(store: FinderConfigurationStore = FinderConfigurationStore()) {
+    init(store: FinderConfigurationStore = FinderConfigurationStore(),
+         importIconResource: @escaping @Sendable (URL, FinderFileTypeIconStore) async throws -> String = { url, store in
+             try await FinderIconImportWorker.shared.importImage(at: url, store: store)
+         }) {
         self.store = store
+        self.importIconResource = importIconResource
         do {
             configuration = try store.load()
             var updated = configuration
@@ -59,12 +65,12 @@ import Observation
     func removeFileType(id: Int) {
         var updated = configuration
         updated.removeFileType(id: id)
-        save(updated)
+        if save(updated) { iconImports[id] = nil }
     }
 
     func restoreDefaults() {
         var updated = configuration
-        do { try updated.restoreDefaults(); save(updated) }
+        do { try updated.restoreDefaults(); if save(updated) { iconImports.removeAll() } }
         catch { message = (error as? FinderMenuError)?.description(in: L.language) ?? error.localizedDescription }
     }
 
@@ -77,25 +83,36 @@ import Observation
         panel.canChooseDirectories = false
         panel.prompt = L.t("Choose Image", "选择图片")
         panel.begin { [weak self] response in
-            self?.applyIconSelection(response == .OK ? panel.url : nil, id: id)
+            let url = response == .OK ? panel.url : nil
+            Task { [weak self] in await self?.applyIconSelection(url, id: id) }
         }
     }
 
-    func applyIconSelection(_ url: URL?, id: Int) {
+    func applyIconSelection(_ url: URL?, id: Int) async {
         guard let url else { return }
-        importIcon(at: url, id: id)
+        await importIcon(at: url, id: id)
     }
 
-    @discardableResult func importIcon(at url: URL, id: Int) -> Bool {
+    @discardableResult func importIcon(at url: URL, id: Int) async -> Bool {
         guard configuration.fileTypes.contains(where: { $0.id == id }) else { return false }
+        let ticket = UUID()
+        iconImports[id] = ticket
+        defer { if iconImports[id] == ticket { iconImports[id] = nil } }
+        let icons = iconStore
         do {
-            let resource = try iconStore.importImage(at: url)
+            let resource = try await importIconResource(url, icons)
+            guard !Task.isCancelled, iconImports[id] == ticket,
+                configuration.fileTypes.contains(where: { $0.id == id }) else {
+                icons.remove(resource: resource)
+                return false
+            }
             var updated = configuration
             do { try updated.setIconResource(resource, for: id) }
             catch { iconStore.remove(resource: resource); throw error }
             guard save(updated) else { iconStore.remove(resource: resource); return false }
             return true
-        } catch {
+        } catch is CancellationError { return false } catch {
+            guard iconImports[id] == ticket else { return false }
             message = L.t("Could not import the icon: ", "无法导入图标：")
                 + ((error as? FinderMenuError)?.description(in: L.language) ?? error.localizedDescription)
             return false
@@ -104,7 +121,7 @@ import Observation
 
     func restoreIcon(id: Int) {
         var updated = configuration
-        do { try updated.setIconResource(nil, for: id); save(updated) }
+        do { try updated.setIconResource(nil, for: id); if save(updated) { iconImports[id] = nil } }
         catch { message = (error as? FinderMenuError)?.description(in: L.language) ?? error.localizedDescription }
     }
 

@@ -5,11 +5,22 @@ import SwiftUI
 struct FinderSettingsView: View {
     @Bindable var model: FinderModel
     @ViewState private var newSuffix = ""
+    @ViewState private var isAddingFileType = false
+    @FocusState private var isSuffixFocused: Bool
+
+    private let fileTypeRowHeight: CGFloat = 44
 
     init(model: FinderModel) { self.model = model }
 
-    private func addFileType() {
-        if model.addFileType(newSuffix) { newSuffix = "" }
+    private func saveFileType() {
+        if model.addFileType(newSuffix) { cancelAddingFileType() }
+        else { isSuffixFocused = true }
+    }
+
+    private func cancelAddingFileType() {
+        isSuffixFocused = false
+        isAddingFileType = false
+        newSuffix = ""
     }
 
     var body: some View {
@@ -31,26 +42,50 @@ struct FinderSettingsView: View {
                 Text(L.t("Actions", "常用操作"))
             }
             Section {
-                ForEach(model.configuration.fileTypes) { type in
-                    HStack {
-                        Image(nsImage: FinderFileTypeIcon.image(for: type, store: model.iconStore, size: 24))
-                            .accessibilityHidden(true)
-                        Text("." + type.suffix)
-                        Spacer()
-                        Button(L.t("Choose Image", "选择图片")) { model.chooseIcon(id: type.id) }
-                            .accessibilityLabel(L.t("Choose icon for .", "选择图标 .") + type.suffix)
-                        Button(L.t("Default Icon", "恢复默认图标")) { model.restoreIcon(id: type.id) }
-                            .disabled(type.iconResource == nil)
-                            .accessibilityLabel(L.t("Restore default icon for .", "恢复默认图标 .") + type.suffix)
-                        Button(L.t("Remove", "删除")) { model.removeFileType(id: type.id) }
-                            .accessibilityLabel(L.t("Remove .", "删除 .") + type.suffix)
+                if !model.configuration.fileTypes.isEmpty {
+                    ScrollView(.vertical) {
+                        VStack(spacing: 0) {
+                            ForEach(model.configuration.fileTypes) { type in
+                                HStack {
+                                    Image(nsImage: FinderFileTypeIcon.image(for: type, store: model.iconStore, size: 24))
+                                        .accessibilityHidden(true)
+                                    Text(type.suffix)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                    Spacer()
+                                    Button(L.t("Choose Image", "选择图片")) { model.chooseIcon(id: type.id) }
+                                        .accessibilityLabel(L.t("Choose icon for ", "选择图标 ") + type.suffix)
+                                    Button(L.t("Default Icon", "恢复默认图标")) { model.restoreIcon(id: type.id) }
+                                        .disabled(type.iconResource == nil)
+                                        .accessibilityLabel(L.t("Restore default icon for ", "恢复默认图标 ") + type.suffix)
+                                    Button(L.t("Remove", "删除")) { model.removeFileType(id: type.id) }
+                                        .accessibilityLabel(L.t("Remove ", "删除 ") + type.suffix)
+                                }
+                                .padding(.trailing, 12)
+                                .frame(height: fileTypeRowHeight)
+                                .overlay(alignment: .bottom) { Divider() }
+                            }
+                        }
                     }
+                    .scrollIndicators(.visible)
+                    .frame(height: fileTypeRowHeight * CGFloat(min(model.configuration.fileTypes.count, 5)))
                 }
-                HStack {
-                    TextField(L.t("File suffix", "文件后缀"), text: $newSuffix)
-                        .onSubmit { addFileType() }
-                    Button(L.t("Add", "添加")) { addFileType() }
-                        .disabled(newSuffix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                if isAddingFileType {
+                    HStack {
+                        TextField(L.t("File type", "文件类型"), text: $newSuffix)
+                            .focused($isSuffixFocused)
+                            .task {
+                                await Task.yield()
+                                guard !Task.isCancelled else { return }
+                                isSuffixFocused = true
+                            }
+                            .onSubmit { saveFileType() }
+                        Button(L.t("Save", "保存")) { saveFileType() }
+                            .disabled(newSuffix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        Button(L.t("Cancel", "取消")) { cancelAddingFileType() }
+                    }
+                } else {
+                    Button(L.t("Add", "添加")) { isAddingFileType = true }
                 }
                 if model.configuration.fileTypes.isEmpty {
                     Text(L.t("No file types", "暂无文件类型"))
@@ -66,5 +101,8 @@ struct FinderSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .onChange(of: model.configuration.enabled) {
+            if !model.configuration.enabled { cancelAddingFileType() }
+        }
     }
 }

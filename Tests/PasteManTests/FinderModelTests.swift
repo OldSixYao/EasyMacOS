@@ -67,11 +67,14 @@ import Testing
                 .write(to: outputURL.appendingPathComponent("finder-\(name).png"))
             if name == "long-list" {
                 func scrollView(in parent: NSView) -> NSScrollView? {
+                    if let nested = parent.subviews.lazy.compactMap({ scrollView(in: $0) }).first { return nested }
                     if let scroll = parent as? NSScrollView { return scroll }
-                    return parent.subviews.lazy.compactMap { scrollView(in: $0) }.first
+                    return nil
                 }
                 let scroll = try #require(scrollView(in: view))
                 let document = try #require(scroll.documentView)
+                #expect(abs(scroll.contentView.bounds.height - 220) < 1)
+                #expect(scroll.hasVerticalScroller)
                 #expect(document.frame.height > scroll.contentView.bounds.height)
                 scroll.contentView.scroll(to: NSPoint(x: 0, y: document.frame.height - scroll.contentView.bounds.height))
                 scroll.reflectScrolledClipView(scroll.contentView)

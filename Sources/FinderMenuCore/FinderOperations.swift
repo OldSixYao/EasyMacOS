@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 public enum FinderOperations {
     public static func directory(for items: [URL], fileManager: FileManager = .default) throws -> URL {
@@ -6,23 +7,41 @@ public enum FinderOperations {
         var directory: URL?
         for url in items {
             guard url.isFileURL else { throw FinderMenuError.missingDirectory }
-            var itemIsDirectory: ObjCBool = false
-            guard fileManager.fileExists(atPath: url.path, isDirectory: &itemIsDirectory) else {
-                throw FinderMenuError.missingDirectory
+            // 普通文件只取一次属性；目录才检查应用包，符号链接才解析目标。
+            var attributes = stat()
+            let status = url.withUnsafeFileSystemRepresentation { path in
+                guard let path else { return Int32(-1) }
+                return lstat(path, &attributes)
             }
-            let values = try url.resolvingSymlinksInPath().resourceValues(forKeys: [.isPackageKey])
+            guard status == 0 else { throw FinderMenuError.missingDirectory }
+            let type = attributes.st_mode & mode_t(S_IFMT)
+            var itemIsDirectory = type == mode_t(S_IFDIR)
+            if type == mode_t(S_IFLNK) {
+                var targetIsDirectory: ObjCBool = false
+                guard fileManager.fileExists(atPath: url.path, isDirectory: &targetIsDirectory) else {
+                    throw FinderMenuError.missingDirectory
+                }
+                itemIsDirectory = targetIsDirectory.boolValue
+            }
+            var isPackage = false
+            if itemIsDirectory {
+                var inspected = type == mode_t(S_IFLNK) ? url.resolvingSymlinksInPath() : url
+                inspected.removeAllCachedResourceValues()
+                isPackage = try inspected.resourceValues(forKeys: [.isPackageKey]).isPackage == true
+            }
             let folder =
-                itemIsDirectory.boolValue && values.isPackage != true
+                itemIsDirectory && !isPackage
                 ? url : url.deletingLastPathComponent()
-            var isDirectory: ObjCBool = false
-            guard fileManager.fileExists(atPath: folder.path, isDirectory: &isDirectory), isDirectory.boolValue else {
-                throw FinderMenuError.missingDirectory
-            }
             let candidate = URL(fileURLWithPath: folder.path, isDirectory: true).standardizedFileURL
             if let directory, directory != candidate { throw FinderMenuError.ambiguousDirectory }
             directory = candidate
         }
         guard let directory else { throw FinderMenuError.missingDirectory }
+        // 同一目录的多选只验证父目录一次，实际执行操作时仍会重新调用本方法校验。
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: directory.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw FinderMenuError.missingDirectory
+        }
         return directory
     }
 

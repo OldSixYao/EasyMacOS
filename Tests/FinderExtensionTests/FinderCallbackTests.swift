@@ -47,9 +47,9 @@ import Testing
         configuration.language = .english
         let plan = try #require(FinderMenuPlan(items: [URL(fileURLWithPath: "/tmp")], configuration: configuration))
         let menu = FinderExtension().makeMenu(plan: plan, configuration: configuration, usesTarget: true)
-        #expect(menu.items.map(\.title) == ["New File", "Copy Full Path", "Copy File Name", "Open Terminal Here", "", "Context Menu Settings…"])
+        #expect(menu.items.map(\.title) == ["New File", "Copy Full Path", "Copy File Name", "Open Terminal Here", "Show/Hide Hidden Files"])
         #expect(menu.items[1].tag == FinderMenuCommand(action: .copyPath, usesTarget: true).tag)
-        #expect(menu.items.first?.submenu?.items.map(\.title) == FinderConfiguration.defaultSuffixes.map { "." + $0 })
+        #expect(menu.items.first?.submenu?.items.map(\.title) == FinderConfiguration.defaultSuffixes)
     }
 
     @Test func cutSelectionAndPasteOnlyAppearInTheirContexts() throws {
@@ -59,7 +59,7 @@ import Testing
             items: [URL(fileURLWithPath: "/tmp")], configuration: configuration, hasSelection: true,
             cutToken: cut.token, cutCommandID: cut.commandID))
         let menu = FinderExtension().makeMenu(plan: plan, configuration: configuration, usesTarget: false)
-        #expect(menu.items.map(\.title) == ["新建文件", "剪切", "粘贴（移动）", "复制完整路径", "复制文件名", "在此处打开终端", "", "访达菜单设置…"])
+        #expect(menu.items.map(\.title) == ["新建文件", "剪切", "粘贴（移动）", "复制完整路径", "复制文件名", "在此处打开终端", "显示／隐藏隐藏文件"])
         let paste = try #require(menu.items.first { $0.title == "粘贴（移动）" })
         #expect(FinderMenuCommand(tag: paste.tag)?.cutCommandID == cut.commandID)
         var disabled = configuration
@@ -120,10 +120,10 @@ import Testing
         let configuration = FinderConfiguration()
         let plan = try #require(FinderMenuPlan(items: [URL(fileURLWithPath: "/tmp")], configuration: configuration))
         let menu = FinderExtension().makeMenu(plan: plan, configuration: configuration, usesTarget: true)
-        #expect(menu.items.map(\.title) == ["新建文件", "复制完整路径", "复制文件名", "在此处打开终端", "", "访达菜单设置…"])
+        #expect(menu.items.map(\.title) == ["新建文件", "复制完整路径", "复制文件名", "在此处打开终端", "显示／隐藏隐藏文件"])
         #expect(menu.items.filter { $0.submenu != nil }.map(\.title) == ["新建文件"])
         let types = try #require(menu.items.first?.submenu).items
-        #expect(types.map(\.title) == FinderConfiguration.defaultSuffixes.map { "." + $0 })
+        #expect(types.map(\.title) == FinderConfiguration.defaultSuffixes)
         for (type, item) in zip(configuration.fileTypes, types) {
             let image = try #require(item.image)
             let data = try NSKeyedArchiver.archivedData(withRootObject: image, requiringSecureCoding: true)
@@ -165,5 +165,18 @@ import Testing
         #expect(menu.items.first?.submenu?.items.allSatisfy { !$0.isEnabled } == true)
         #expect(menu.items.first { $0.title == "在此处打开终端" }?.isEnabled == false)
         #expect(menu.items.first { $0.title == "复制完整路径" }?.isEnabled == true)
+        #expect(menu.items.first { $0.title == "显示／隐藏隐藏文件" }?.isEnabled == true)
+    }
+
+    @Test func hiddenFilesToggleCanBeDisabledAndNeverAddsSettingsEntry() throws {
+        var configuration = FinderConfiguration()
+        configuration.set(.toggleHiddenFiles, enabled: false)
+        var plan = try #require(FinderMenuPlan(items: [URL(fileURLWithPath: "/tmp")], configuration: configuration))
+        var menu = FinderExtension().makeMenu(plan: plan, configuration: configuration, usesTarget: true)
+        #expect(!menu.items.contains { $0.title == "显示／隐藏隐藏文件" })
+        for action in FinderAction.allCases { configuration.set(action, enabled: false) }
+        plan = try #require(FinderMenuPlan(items: [URL(fileURLWithPath: "/tmp")], configuration: configuration))
+        menu = FinderExtension().makeMenu(plan: plan, configuration: configuration, usesTarget: true)
+        #expect(menu.items.isEmpty)
     }
 }

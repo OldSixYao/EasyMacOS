@@ -11,7 +11,7 @@ import Testing
         return root
     }
 
-    @Test func fileObjectsOnlyMultiSelectionAndRestartPreserveCut() throws {
+    @Test func fileObjectsOnlyMultiSelectionAndRestartPreserveCut() async throws {
         let root = try folder()
         defer { try? FileManager.default.removeItem(at: root) }
         let file = root.appendingPathComponent("中文 空格 ' &$.txt")
@@ -26,7 +26,7 @@ import Testing
         #expect(board.pasteboardItems?.count == 2)
         #expect(board.pasteboardItems?.allSatisfy { Set($0.types) == [.fileURL, FinderCutClipboard.markerType] } == true)
         #expect(board.string(forType: .string) == nil)
-        #expect(SystemClipboard(pasteboard: board).capture() == nil)
+        #expect(await SystemClipboard(pasteboard: board).capture(expectedChangeCount: board.changeCount) == nil)
         let restarted = FinderCutClipboard(board: board, store: store)
         #expect(try restarted.current(token: state.token).1.map(\.path) == [file.path, directory.path])
         #expect(try String(contentsOf: file, encoding: .utf8) == "文件内容")

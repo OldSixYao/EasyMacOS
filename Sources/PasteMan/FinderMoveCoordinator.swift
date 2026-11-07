@@ -119,7 +119,7 @@ struct FinderMoveSnapshot {
         return unsafeDowncast(value, to: AXUIElement.self)
     }
 
-    static func snapshot() -> FinderMoveSnapshot {
+    static func snapshot(requiresDirectory: Bool = true) -> FinderMoveSnapshot {
         let front = NSWorkspace.shared.frontmostApplication
         let mask: CGEventFlags = [.maskShift, .maskControl, .maskAlternate, .maskCommand, .maskSecondaryFn]
         let released = CGEventSource.flagsState(.combinedSessionState).intersection(mask).isEmpty
@@ -152,6 +152,10 @@ struct FinderMoveSnapshot {
         // 名称、搜索或路径输入框都不接收移动快捷键。
         guard [kAXOutlineRole, kAXTableRole, kAXListRole, kAXBrowserRole, kAXScrollAreaRole, kAXGroupRole,
              kAXRowRole, kAXCellRole, kAXImageRole].contains(role) else { return result }
+        if !requiresDirectory {
+            result.blocked = false
+            return result
+        }
         let raw = attribute(window, kAXDocumentAttribute)
         let document = (raw as? URL) ?? (raw as? String).flatMap(URL.init(string:))
         var budget = 80

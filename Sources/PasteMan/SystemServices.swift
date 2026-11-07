@@ -4,12 +4,11 @@ import Carbon
 import Observation
 import PasteManCore
 import ServiceManagement
-import UniformTypeIdentifiers
 
 @MainActor protocol ClipboardReading: AnyObject {
     var changeCount: Int { get }
     var types: Set<String> { get }
-    func capture() -> ClipboardSnapshot?
+    func capture(expectedChangeCount: Int) async -> ClipboardSnapshot?
 }
 
 @MainActor protocol ClipboardWriting {
@@ -33,26 +32,8 @@ enum ClipboardSnapshot: Sendable {
     var types: Set<String> {
         Set((pasteboard.pasteboardItems ?? []).flatMap { $0.types.map(\.rawValue) })
     }
-    func capture() -> ClipboardSnapshot? {
-        let interval = PerformanceTrace.signposter.beginInterval("ClipboardRead", id: PerformanceTrace.signposter.makeSignpostID())
-        defer { PerformanceTrace.signposter.endInterval("ClipboardRead", interval) }
-        for item in pasteboard.pasteboardItems ?? [] {
-            // A Finder file copy may expose text or promised thumbnails. Do not record either.
-            if item.types.contains(.fileURL)
-                || item.types.contains(NSPasteboard.PasteboardType("NSFilenamesPboardType"))
-            {
-                continue
-            }
-            let preferred: [NSPasteboard.PasteboardType] = [.png, .tiff]
-            let otherImages = item.types.filter {
-                !preferred.contains($0) && UTType($0.rawValue)?.conforms(to: .image) == true
-            }
-            for type in preferred + otherImages where item.types.contains(type) {
-                if let data = item.data(forType: type) { return .image(data) }
-            }
-            if let text = item.string(forType: .string), !text.isEmpty { return .text(text) }
-        }
-        return nil
+    func capture(expectedChangeCount: Int) async -> ClipboardSnapshot? {
+        await ClipboardReadWorker.shared.capture(name: pasteboard.name.rawValue, expectedChangeCount: expectedChangeCount)
     }
     func write(_ content: PreparedContent) -> Bool {
         pasteboard.clearContents()

@@ -225,7 +225,9 @@ import UniformTypeIdentifiers
         guard !disposed else { return }
         let desired = max(1, Int(ceil(max(bounds.width, bounds.height) * (window?.backingScaleFactor ?? 2))))
         let pixels = min(pixelLimit, ((desired + 127) / 128) * 128)
-        if displayImage != nil, displayPixels >= pixels, displayPixels <= pixelLimit {
+        // 尺寸差距不足两倍时继续复用；明显缩小才延迟换图，减少拖动期间反复分配。
+        let shrinking = displayImage.map { max($0.width, $0.height) >= pixels * 2 } ?? false
+        if displayImage != nil, displayPixels >= pixels, displayPixels <= pixelLimit, !shrinking {
             if displayTask != nil {
                 displayRevision += 1
                 displayTask?.cancel()
@@ -241,8 +243,8 @@ import UniformTypeIdentifiers
         let deferResize = displayImage != nil
         displayTask = Task { [weak self, image] in
             do {
-                // 首次显示与预算收缩立即处理；连续放大时让合成器复用旧图，停稳后补清晰像素。
-                if deferResize { try await Task.sleep(for: .milliseconds(60)) }
+                // 缩小时多等待片刻；若随即放大，上面的复用分支会取消尚未开始的缩小。
+                if deferResize { try await Task.sleep(for: .milliseconds(shrinking ? 180 : 60)) }
                 try Task.checkCancellation()
                 self?.displayDecodeCount += 1
                 let bitmap = try await image.display(maximumPixels: pixels)

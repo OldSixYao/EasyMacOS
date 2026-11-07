@@ -4,7 +4,70 @@ import Testing
 
 @testable import PasteMan
 
+private actor DelayedIconImport {
+    private var continuation: CheckedContinuation<Void, Never>?
+    var started: Bool { continuation != nil }
+    func wait() async { await withCheckedContinuation { continuation = $0 } }
+    func resume() { continuation?.resume(); continuation = nil }
+}
+
 @Suite("文件类型图标与办公升级", .serialized) @MainActor struct FinderIconAndMigrationTests {
+    @Test(arguments: ["restore", "remove", "defaults", "cancel"])
+    func pendingImportCannotUndoNewerUserActions(_ action: String) async throws {
+        let store = store()
+        let root = store.url.deletingLastPathComponent()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent("输入.png")
+        try image(at: source)
+        let delayed = DelayedIconImport()
+        let model = FinderModel(store: store, importIconResource: { url, icons in
+            await delayed.wait()
+            return try await FinderIconImportWorker.shared.importImage(at: url, store: icons)
+        })
+        let importing = Task { await model.importIcon(at: source, id: 1) }
+        defer { importing.cancel(); Task { await delayed.resume() } }
+        let deadline = ContinuousClock.now + .seconds(2)
+        while !(await delayed.started), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        try #require(await delayed.started)
+        switch action {
+        case "restore": model.restoreIcon(id: 1)
+        case "remove": model.removeFileType(id: 1)
+        case "defaults": model.restoreDefaults()
+        default: importing.cancel()
+        }
+        let expected = model.configuration
+        await delayed.resume()
+        #expect(!(await importing.value))
+        #expect(model.configuration == expected)
+        #expect(try store.load() == expected)
+        if FileManager.default.fileExists(atPath: model.iconStore.directory.path) {
+            #expect(try FileManager.default.contentsOfDirectory(atPath: model.iconStore.directory.path).isEmpty)
+        }
+    }
+
+    @Test func unchangedIconsReuseBitmapsAndRemovalInvalidatesCustomPixels() throws {
+        let store = store()
+        let root = store.url.deletingLastPathComponent()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let icons = FinderFileTypeIconStore(configurationStore: store)
+        let type = FinderFileType(id: 1, suffix: "docx")
+        let first = FinderFileTypeIcon.image(for: type, store: icons)
+        #expect(first === FinderFileTypeIcon.image(for: type, store: icons))
+        #expect(first !== FinderFileTypeIcon.image(for: type, store: icons, size: 24))
+        let source = root.appendingPathComponent("输入.png")
+        try image(at: source)
+        let resource = try icons.importImage(at: source)
+        let custom = FinderFileType(id: 1, suffix: "docx", iconResource: resource)
+        let pixels = FinderFileTypeIcon.image(for: custom, store: icons)
+        #expect(pixels === FinderFileTypeIcon.image(for: custom, store: icons))
+        icons.remove(resource: resource)
+        #expect(FinderFileTypeIcon.image(for: custom, store: icons).tiffRepresentation == first.tiffRepresentation)
+    }
+
     private func store() -> FinderConfigurationStore {
         FinderConfigurationStore(url: FileManager.default.temporaryDirectory
             .appendingPathComponent("FinderIcons-" + UUID().uuidString).appendingPathComponent("menu.json"))
@@ -80,7 +143,7 @@ import Testing
         #expect(FinderModel(store: store).configuration.officeTypesMigrated)
     }
 
-    @Test func importedIconsSurviveRestartAndOriginalRemovalAndCleanAfterSave() throws {
+    @Test func importedIconsSurviveRestartAndOriginalRemovalAndCleanAfterSave() async throws {
         let store = store()
         let root = store.url.deletingLastPathComponent()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -88,7 +151,7 @@ import Testing
         let source = root.appendingPathComponent("原始图片.png")
         try image(at: source)
         let model = FinderModel(store: store)
-        #expect(model.importIcon(at: source, id: 1))
+        #expect(await model.importIcon(at: source, id: 1))
         let first = try #require(model.configuration.fileTypes.first?.iconResource)
         let firstURL = try #require(model.iconStore.url(for: first))
         let bitmap = try #require(NSBitmapImageRep(data: Data(contentsOf: firstURL)))
@@ -103,26 +166,26 @@ import Testing
         try FileManager.default.removeItem(at: source)
         #expect(restart.iconStore.image(resource: first) != nil)
         #expect(restart.configuration.fileTypes.first?.iconResource == first)
-        #expect(!restart.importIcon(at: source, id: 1))
+        #expect(!(await restart.importIcon(at: source, id: 1)))
         #expect(restart.configuration.fileTypes.first?.iconResource == first)
         try image(at: source)
-        #expect(restart.importIcon(at: source, id: 1))
+        #expect(await restart.importIcon(at: source, id: 1))
         let second = try #require(restart.configuration.fileTypes.first?.iconResource)
         #expect(second != first)
         #expect(!FileManager.default.fileExists(atPath: firstURL.path))
         restart.restoreIcon(id: 1)
         #expect(restart.configuration.fileTypes.first?.iconResource == nil)
         #expect(try FileManager.default.contentsOfDirectory(atPath: restart.iconStore.directory.path).isEmpty)
-        #expect(restart.importIcon(at: source, id: 1))
+        #expect(await restart.importIcon(at: source, id: 1))
         restart.removeFileType(id: 1)
         #expect(try FileManager.default.contentsOfDirectory(atPath: restart.iconStore.directory.path).isEmpty)
-        #expect(restart.importIcon(at: source, id: 2))
+        #expect(await restart.importIcon(at: source, id: 2))
         restart.restoreDefaults()
         #expect(restart.configuration.fileTypes.allSatisfy { $0.iconResource == nil })
         #expect(try FileManager.default.contentsOfDirectory(atPath: restart.iconStore.directory.path).isEmpty)
     }
 
-    @Test func iconFailuresPreserveConfigurationAndOldResource() throws {
+    @Test func iconFailuresPreserveConfigurationAndOldResource() async throws {
         let store = store()
         let root = store.url.deletingLastPathComponent()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -130,22 +193,22 @@ import Testing
         let source = root.appendingPathComponent("输入.png")
         try image(at: source)
         let model = FinderModel(store: store)
-        #expect(model.importIcon(at: source, id: 1))
+        #expect(await model.importIcon(at: source, id: 1))
         let previous = model.configuration
         let savedData = try Data(contentsOf: store.url)
-        model.applyIconSelection(nil, id: 1)
+        await model.applyIconSelection(nil, id: 1)
         #expect(model.configuration == previous)
         #expect(try Data(contentsOf: store.url) == savedData)
         let resource = try #require(previous.fileTypes.first?.iconResource)
         let previousData = try Data(contentsOf: #require(model.iconStore.url(for: resource)))
         try Data("不是图片".utf8).write(to: source)
-        #expect(!model.importIcon(at: source, id: 1))
+        #expect(!(await model.importIcon(at: source, id: 1)))
         #expect(model.configuration == previous)
         try image(at: source)
         // 资源写入成功、配置保存失败：回滚新资源，保留旧资源。
         try FileManager.default.removeItem(at: store.url)
         try FileManager.default.createDirectory(at: store.url, withIntermediateDirectories: false)
-        #expect(!model.importIcon(at: source, id: 1))
+        #expect(!(await model.importIcon(at: source, id: 1)))
         model.restoreIcon(id: 1)
         model.removeFileType(id: 1)
         model.restoreDefaults()
@@ -155,7 +218,7 @@ import Testing
         // 图片目录不可保存，同样不影响原配置。
         try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: model.iconStore.directory.path)
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: model.iconStore.directory.path) }
-        #expect(!model.importIcon(at: source, id: 1))
+        #expect(!(await model.importIcon(at: source, id: 1)))
         #expect(model.configuration == previous)
     }
 

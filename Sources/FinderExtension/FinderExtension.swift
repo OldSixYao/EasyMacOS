@@ -24,9 +24,7 @@ import FinderSync
         }
         guard !items.isEmpty, items.allSatisfy(\.isFileURL) else { return nil }
         let configuration: FinderConfiguration
-        do { configuration = try FinderConfigurationStore().load() } catch {
-            return settingsMenu(title: "访达菜单配置无法读取…")
-        }
+        do { configuration = try FinderConfigurationStore().load() } catch { return nil }
         let cutState = try? FinderCutStateStore().load()
         let cutToken = cutState?.availableToken(changeCount: NSPasteboard.general.changeCount)
         guard let plan = FinderMenuPlan(
@@ -51,7 +49,7 @@ import FinderSync
                 let types = NSMenu(title: action.title(in: language))
                 types.autoenablesItems = false
                 for type in configuration.fileTypes {
-                    let child = NSMenuItem(title: "." + type.suffix, action: #selector(performMenuAction(_:)), keyEquivalent: "")
+                    let child = NSMenuItem(title: type.suffix, action: #selector(performMenuAction(_:)), keyEquivalent: "")
                     child.target = self
                     child.image = FinderFileTypeIcon.image(for: type)
                     child.tag = FinderMenuCommand(action: action, usesTarget: usesTarget, fileTypeID: type.id).tag
@@ -67,21 +65,7 @@ import FinderSync
             }
             menu.addItem(item)
         }
-        if !menu.items.isEmpty { menu.addItem(.separator()) }
-        addSettings(to: menu, title: language.text("Context Menu Settings…", "访达菜单设置…"))
         return menu
-    }
-
-    private func settingsMenu(title: String) -> NSMenu {
-        let menu = NSMenu()
-        addSettings(to: menu, title: title)
-        return menu
-    }
-
-    private func addSettings(to menu: NSMenu, title: String = "访达菜单设置…") {
-        let item = NSMenuItem(title: title, action: #selector(openSettings(_:)), keyEquivalent: "")
-        item.target = self
-        menu.addItem(item)
     }
 
     @objc func performMenuAction(_ sender: NSMenuItem) {
@@ -122,10 +106,6 @@ import FinderSync
         default:
             openHost(request.url)
         }
-    }
-
-    @objc func openSettings(_ sender: NSMenuItem) {
-        Task { @MainActor in Self.openHost(FinderRequest.settingsURL) }
     }
 
     @MainActor private static func openHost(_ url: URL) {

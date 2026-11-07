@@ -147,6 +147,16 @@ import Testing
         report.values["六张钉图缩放后显示缓存统计_字节"] = [Double(pins.cachedDisplayByteCount)]
         report.values["六张钉图缩放后物理占用_字节"] = [Double(try benchmarkFootprint())]
         pins.closeAll()
+        pins.show(smallPin, sourceID: "test", sourceName: "合成应用", origin: nil)
+        if let window = pins.windows.first {
+            window.setContentSize(CGSize(width: 1200, height: 675))
+            await pins.waitForDisplays()
+            report.values["钉图缩小前显示缓存_字节"] = [Double(pins.cachedDisplayByteCount)]
+            window.setContentSize(CGSize(width: 200, height: 112.5))
+            await pins.waitForDisplays()
+            report.values["钉图缩小后显示缓存_字节"] = [Double(pins.cachedDisplayByteCount)]
+        }
+        pins.closeAll()
         report.values["正常监控轮询间隔_毫秒"] = [benchmarkMilliseconds(monitor.pollInterval)]
         settings.paused = true
         report.values["暂停监控轮询间隔_毫秒"] = [benchmarkMilliseconds(monitor.pollInterval)]
@@ -196,6 +206,16 @@ import Testing
             items.append(url)
         }
         try await report.measure("千个文件目录检查_总耗时") { _ = try await FinderFileWorker.shared.directory(for: items) }
+        try await report.measure("千个文件菜单规划_总耗时") {
+            _ = FinderMenuPlan(items: items, configuration: FinderConfiguration(), hasSelection: true)
+        }
+        try await report.measure("访达默认图标_百轮") {
+            autoreleasepool {
+                for _ in 0..<100 {
+                    for type in FinderConfiguration().fileTypes { _ = FinderFileTypeIcon.image(for: type) }
+                }
+            }
+        }
         var stalls: [Double] = []
         for _ in 0..<7 {
             let heartbeat = BenchmarkHeartbeat()
@@ -273,7 +293,7 @@ import Testing
         try #require(board.setData(png, forType: .png))
         let reader = SystemClipboard(pasteboard: board)
         try await report.measure("独立剪贴板一百次读取合成图片_毫秒") {
-            for _ in 0..<100 { _ = try #require(reader.capture()) }
+            for _ in 0..<100 { _ = try #require(await reader.capture(expectedChangeCount: board.changeCount)) }
         }
         try report.write(outputKey: "EASYMACOS_INPUT_BENCHMARK_OUTPUT")
     }
@@ -310,7 +330,7 @@ import Testing
     var refreshes = 0
     var snapshot: ClipboardSnapshot?
     func refreshClipboard() { refreshes += 1 }
-    func capture() -> ClipboardSnapshot? { snapshot }
+    func capture(expectedChangeCount: Int) -> ClipboardSnapshot? { snapshot }
 }
 
 @MainActor private final class BenchmarkReport {
