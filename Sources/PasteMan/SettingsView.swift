@@ -131,7 +131,8 @@ struct SettingsView: View {
     }
 
     private var generalSettings: some View {
-        Form {
+        @Bindable var settings = model.settings
+        return Form {
             Section {
                 Picker(L.t("Interface language", "界面语言"), selection: Binding(
                     get: { L.language },
@@ -152,6 +153,8 @@ struct SettingsView: View {
                         SMAppService.openSystemSettingsLoginItems()
                     }
                 }
+                Toggle(L.t("Show in Dock", "在程序坞中显示"), isOn: $settings.showInDock)
+                    .accessibilityIdentifier("settings.showInDock")
             }
             Section {
                 LabeledContent(L.t("Version", "版本")) {

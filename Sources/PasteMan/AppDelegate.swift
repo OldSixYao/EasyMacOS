@@ -77,6 +77,7 @@ import SwiftUI
             let keys = HotKeyService()
             let state = AppModel(repository: repository, settings: settings, permissions: permissions, hotKeys: keys, updates: updates)
             model = state
+            configureDockVisibility(settings)
             let mouseScroll = state.mouseScroll
             state.finderModel.setLanguage(L.language)
             NotificationCenter.default.addObserver(
@@ -187,6 +188,39 @@ import SwiftUI
     }
     func application(_ application: NSApplication, open urls: [URL]) {
         finderRequests.enqueue(urls.filter { $0.scheme == FinderRequest.scheme })
+    }
+
+    private func configureDockVisibility(_ settings: AppSettings) {
+        settings.onDockVisibilityChanged = { [weak self, weak settings] in
+            guard let settings else { return }
+            self?.applyDockVisibility(settings.showInDock)
+        }
+        applyDockVisibility(settings.showInDock)
+    }
+
+    private func applyDockVisibility(_ visible: Bool) {
+        let policy: NSApplication.ActivationPolicy = visible ? .regular : .accessory
+        guard NSApp.activationPolicy() != policy else { return }
+        let window = NSApp.isActive ? NSApp.keyWindow : nil
+        NSApp.setActivationPolicy(policy)
+        // 系统切换显示策略时可能改变焦点，下一轮恢复原先正在操作的窗口。
+        if let window {
+            DispatchQueue.main.async { [weak window] in
+                guard let window, window.isVisible else { return }
+                NSApp.activate()
+                window.makeKeyAndOrderFront(nil)
+            }
+        }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        guard let model else { return false }
+        if model.settings.hasOnboarded {
+            presentSettings()
+        } else {
+            showWelcome()
+        }
+        return false
     }
 
     private func handleFinderRequest(_ url: URL) async {

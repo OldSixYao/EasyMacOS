@@ -31,7 +31,15 @@ open dist/EasyMacOS.app
 
 同一次构建只生成 `dist/EasyMacOS.app`。访达右键扩展以 `FinderExtension.appex` 内嵌在同一个应用包中，版本统一从 `scripts/Info.plist` 注入。
 
-The app lives in the menu bar and does not appear in the Dock. Start with the welcome window, then copy new text or images in another app. Click the menu bar icon or press **⌘⇧V**. The initial clipboard is not imported.
+应用常驻菜单栏，默认隐藏程序坞图标。在“设置 → 通用”的“开机启动”下方使用“在程序坞中显示”开关，修改立即生效，退出重开后保留；首次使用及旧版本升级均默认关闭。显示后点击程序坞图标可打开或前置设置窗口，未完成首次引导时优先展示引导。关闭所有窗口不会退出应用，隐藏图标后仍可通过菜单栏进入设置。
+
+首次使用先完成欢迎窗口中的引导，再在其他应用复制新文字或图片。点击菜单栏图标或按 **⌘⇧V** 打开历史；启动时已有的剪贴板内容不会导入。
+
+程序坞偏好检查使用独立测试偏好，不修改实际应用设置：
+
+```sh
+./scripts/test.sh --filter DockVisibilityTests
+```
 
 - Type to search text and application names; filter by kind, favorites, or source application.
 - Use ↑/↓ and Enter, click a row, or use its return button to paste.

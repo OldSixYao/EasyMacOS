@@ -43,6 +43,14 @@ struct Shortcut: Codable, Equatable {
         }
     }
     var excludedApps: Set<String> { didSet { defaults.set(excludedApps.sorted(), forKey: "excludedApps") } }
+    @ObservationIgnored var onDockVisibilityChanged: (() -> Void)?
+    var showInDock: Bool {
+        didSet {
+            guard oldValue != showInDock else { return }
+            defaults.set(showInDock, forKey: "showInDock")
+            onDockVisibilityChanged?()
+        }
+    }
     @ObservationIgnored var onClipboardChanged: (() -> Void)?
     @ObservationIgnored var onScreenshotChanged: (() -> Void)?
     var clipboardEnabled: Bool {
@@ -101,6 +109,7 @@ struct Shortcut: Codable, Equatable {
         storedRetentionDays = max(1, defaults.object(forKey: "retentionDays") as? Int ?? 30)
         storedHistoryLimit = max(1, defaults.object(forKey: "historyLimit") as? Int ?? 500)
         excludedApps = defaults.stringArray(forKey: "excludedApps").map(Set.init) ?? PrivacyPolicy.defaultExcludedApps
+        showInDock = defaults.bool(forKey: "showInDock")
         clipboardEnabled = defaults.object(forKey: "clipboardEnabled") as? Bool ?? true
         screenshotEnabled = defaults.object(forKey: "screenshotEnabled") as? Bool ?? true
         storedMouse = defaults.data(forKey: "mouseScrollConfiguration")

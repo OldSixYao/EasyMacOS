@@ -6,8 +6,8 @@
     <key>CFBundleIdentifier</key><string>app.pasteman.PasteMan</string>
     <key>CFBundleExecutable</key><string>EasyMacOS</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.0.34</string>
-    <key>CFBundleVersion</key><string>35</string>
+    <key>CFBundleShortVersionString</key><string>1.0.35</string>
+    <key>CFBundleVersion</key><string>36</string>
     <key>SUFeedURL</key><string>https://github.com/OldSixYao/EasyMacOS/releases/latest/download/appcast.xml</string>
     <key>SUPublicEDKey</key><string>ZkgV5O7CnpMszibrnX+OuRe8XHJ5pscM3n5+RKya7cU=</string>
     <key>SUEnableAutomaticChecks</key><false/>
