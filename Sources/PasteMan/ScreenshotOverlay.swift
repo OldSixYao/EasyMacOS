@@ -14,16 +14,20 @@ import SwiftUI
     var hoverChanged: ((String?) -> Void)?
     var toolbarHeight: CGFloat {
         46 + (optionsExpanded ? 36 : 0) + (shapesExpanded ? 36 : 0) + (busy ? 36 : 0) + (error == nil ? 0 : 68)
+            + (prefersLongScreenshot && !isLongEditor ? 48 : 0)
     }
     var busy = false
     var error: String?
+    var isLongEditor = false
+    var prefersLongScreenshot = false
+    var toolbarWidth: CGFloat { ScreenshotToolbar.width + (isLongEditor ? 0 : 36) }
     var canAdjust: Bool { history.annotations.isEmpty && history.undone.isEmpty }
     var action: ((ScreenshotEditorAction) -> Void)?
 }
 
 enum ScreenshotEditorAction {
     case tool(AnnotationTool)
-    case undo, redo, reselect, copy, save, pin, cancel
+    case undo, redo, reselect, longScreenshot, copy, save, pin, cancel
 }
 
 struct ScreenshotToolbar: View {
@@ -44,11 +48,17 @@ struct ScreenshotToolbar: View {
                 }.modifier(ScreenshotHoverFeedback(title: L.t("Shapes and selection", "形状与选区"), state: state))
                 ForEach([AnnotationTool.arrow, .pen, .text, .mosaic], id: \.self) { tool in toolButton(tool) }
                 separator
-                action("arrow.uturn.backward", title: L.t("Undo ⌘Z", "撤销 ⌘Z"), action: .undo)
-                    .disabled(state.history.annotations.isEmpty)
-                action("arrow.uturn.forward", title: L.t("Redo ⇧⌘Z", "重做 ⇧⌘Z"), action: .redo)
-                    .disabled(state.history.undone.isEmpty)
-                action("arrow.up.left.and.arrow.down.right", title: L.t("Reselect", "重新框选"), action: .reselect)
+                action("arrow.uturn.backward", title: L.t("Undo ⌘Z", "撤销 ⌘Z"), action: .undo,
+                    enabled: !state.history.annotations.isEmpty)
+                action("arrow.uturn.forward", title: L.t("Redo ⇧⌘Z", "重做 ⇧⌘Z"), action: .redo,
+                    enabled: !state.history.undone.isEmpty)
+                if !state.isLongEditor {
+                    action("arrow.up.left.and.arrow.down.right", title: L.t("Reselect", "重新框选"), action: .reselect)
+                    action("rectangle.portrait.and.arrow.down", title: state.canAdjust
+                        ? L.t("Start scrolling screenshot", "开始长截屏")
+                        : L.t("Reselect before starting a scrolling screenshot", "已有标注，请先重新框选再长截屏"),
+                        action: .longScreenshot, enabled: state.canAdjust)
+                }
                 separator
                 action("square.and.arrow.down", title: L.t("Save PNG…", "保存 PNG…"), action: .save)
                 action("pin", title: L.t("Pin to desktop", "钉在桌面"), action: .pin)
@@ -70,8 +80,9 @@ struct ScreenshotToolbar: View {
                         } label: {
                             Label(tool.title, systemImage: tool.symbol)
                         }
-                        .modifier(ScreenshotHoverFeedback(title: tool.title, state: state))
-                        .disabled(tool == .select && !state.canAdjust)
+                        .disabled(tool == .select && (!state.canAdjust || state.isLongEditor))
+                        .modifier(ScreenshotHoverFeedback(title: tool.title, state: state,
+                            buttonEnabled: tool != .select || (state.canAdjust && !state.isLongEditor)))
                     }
                     Spacer(minLength: 0)
                 }.frame(height: 36).padding(.horizontal, 14)
@@ -106,11 +117,16 @@ struct ScreenshotToolbar: View {
                 }.frame(height: 36).padding(.horizontal, 16)
             }
             if state.busy { ProgressView().controlSize(.small).padding(8) }
+            if state.prefersLongScreenshot && !state.isLongEditor {
+                Button(L.t("Start scrolling screenshot", "开始长截屏")) { state.action?(.longScreenshot) }
+                    .buttonStyle(.borderedProminent).tint(Self.tint)
+                    .disabled(!state.canAdjust).padding(8)
+            }
             if let error = state.error { Text(error).font(.caption).foregroundStyle(.orange).lineLimit(3).padding(10) }
         }
         .font(.system(size: 17, weight: .regular))
         .buttonStyle(.plain)
-        .frame(width: Self.width)
+        .frame(width: state.toolbarWidth)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 9))
         .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(.primary.opacity(0.08), lineWidth: 0.5))
         .disabled(state.busy)
@@ -132,20 +148,23 @@ struct ScreenshotToolbar: View {
                 .background(state.tool == tool ? Self.tint.opacity(0.1) : .clear, in: RoundedRectangle(cornerRadius: 5))
         }.modifier(ScreenshotHoverFeedback(title: tool.title, state: state))
     }
-    private func action(_ symbol: String, title: String, action: ScreenshotEditorAction, color: Color? = nil)
+    private func action(_ symbol: String, title: String, action: ScreenshotEditorAction, color: Color? = nil,
+                        enabled: Bool = true)
         -> some View
     {
         Button {
             state.action?(action)
         } label: {
             Image(systemName: symbol).frame(width: 32, height: 32).foregroundStyle(color ?? Color.primary.opacity(0.7))
-        }.modifier(ScreenshotHoverFeedback(title: title, state: state))
+        }.disabled(!enabled)
+            .modifier(ScreenshotHoverFeedback(title: title, state: state, buttonEnabled: enabled))
     }
 }
 
 private struct ScreenshotHoverFeedback: ViewModifier {
     let title: String
     let state: ScreenshotEditorState
+    var buttonEnabled = true
     @ViewState private var hovering = false
     @Environment(\.isEnabled) private var enabled
 
@@ -153,7 +172,7 @@ private struct ScreenshotHoverFeedback: ViewModifier {
         content
             .contentShape(Rectangle())
             .background(
-                hovering && enabled ? ScreenshotToolbar.tint.opacity(0.16) : .clear,
+                hovering && enabled && buttonEnabled ? ScreenshotToolbar.tint.opacity(0.16) : .clear,
                 in: RoundedRectangle(cornerRadius: 5)
             )
             .onHover { inside in
@@ -491,7 +510,7 @@ private struct ScreenshotHoverFeedback: ViewModifier {
         }
         guard let toolbar else { return }
         let height = state.toolbarHeight
-        let width = ScreenshotToolbar.width
+        let width = state.toolbarWidth
         let x = min(max(8, selection.maxX - width), max(8, bounds.width - width - 8))
         var y = selection.maxY + 10
         if y + height > bounds.height - 8 { y = selection.minY - height - 10 }
@@ -613,6 +632,7 @@ private struct ScreenshotHoverFeedback: ViewModifier {
             state.history.redo()
             updatePreview()
         case .reselect: coordinator?.reselect()
+        case .longScreenshot: coordinator?.startLongScreenshot(from: self)
         case .copy: coordinator?.finish(.copy, from: self)
         case .save: coordinator?.finish(.save, from: self)
         case .pin: coordinator?.finish(.pin, from: self)

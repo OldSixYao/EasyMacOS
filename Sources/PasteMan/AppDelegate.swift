@@ -52,8 +52,9 @@ import SwiftUI
     private var menuOpen = false
     private let finderRequests = FinderRequestQueue()
 
-    init(updates: any UpdateChecking = UpdateController()) {
+    init(updates: any UpdateChecking = UpdateController(), screenshots: ScreenshotCoordinator? = nil) {
         self.updates = updates
+        self.screenshots = screenshots
         super.init()
     }
 
@@ -134,8 +135,11 @@ import SwiftUI
             state.onClear = { [weak self] in self?.confirmClear() }
             state.onPause = { [weak self] in self?.togglePause() }
             keys.onInvoke = { [weak self] in self?.togglePanel(fromMenuBar: false) }
-            let screenshotController = ScreenshotCoordinator()
+            let screenshotController = screenshots ?? ScreenshotCoordinator()
             screenshots = screenshotController
+            screenshotController.onLongScrollSuspension = { [weak mouseScroll] suspended in
+                mouseScroll?.setSessionActive(!suspended, reason: "long-screenshot")
+            }
             configureScreenRecording(settings: settings, permissions: permissions, keys: keys)
             keys.onScreenshot = { [weak self] in self?.startScreenshot() }
             screenshotController.onError = { message in
@@ -454,7 +458,15 @@ import SwiftUI
         menu.addItem(.separator())
         addMenu(
             menu, L.t("Screenshot", "截图") + "  " + model.settings.screenshotShortcut.label, #selector(startScreenshot),
-            enabled: model.settings.screenshotEnabled && !screenRecorder.isActive)
+            enabled: model.settings.screenshotEnabled && !screenRecorder.isActive && screenshots?.isActive != true)
+        addMenu(menu, L.t("Scrolling Screenshot…", "长截屏…"), #selector(startLongScreenshot),
+                enabled: model.settings.screenshotEnabled && !screenRecorder.isActive && screenshots?.isActive != true)
+        if screenshots?.phase == .longCapturing {
+            addMenu(menu, L.t("Stop Scrolling Screenshot and Edit", "停止长截屏并编辑"), #selector(stopLongScreenshot))
+            addMenu(menu, L.t("Cancel Scrolling Screenshot", "取消长截屏"), #selector(cancelLongScreenshot))
+        } else if screenshots?.longEditor != nil {
+            addMenu(menu, L.t("Continue Editing Scrolling Screenshot…", "继续编辑长截屏…"), #selector(showLongScreenshotEditor))
+        }
         if !screenRecorder.isActive {
             addMenu(menu, HotKeyAction.recordFullScreen.title + "  " + model.settings.shortcut(for: .recordFullScreen).label,
                     #selector(startFullScreenRecording), enabled: model.settings.screenRecordingEnabled && screenshots?.isActive != true)
@@ -510,6 +522,15 @@ import SwiftUI
         menu.addItem(item)
     }
     @objc private func startScreenshot() {
+        beginScreenshot(prefersLongScreenshot: false)
+    }
+    @objc private func startLongScreenshot() {
+        beginScreenshot(prefersLongScreenshot: true)
+    }
+    @objc private func stopLongScreenshot() { screenshots?.stopLongScreenshot() }
+    @objc private func cancelLongScreenshot() { screenshots?.cancel() }
+    @objc private func showLongScreenshotEditor() { screenshots?.showLongScreenshotEditor() }
+    private func beginScreenshot(prefersLongScreenshot: Bool) {
         guard let model, model.settings.screenshotEnabled, screenshots?.isActive != true, !screenRecorder.isActive else { return }
         guard model.settings.hasOnboarded else {
             showWelcome()
@@ -532,7 +553,7 @@ import SwiftUI
         }
         screenshots?.start(
             screens: screens, sourceID: source?.bundleIdentifier ?? "unknown",
-            sourceName: source?.localizedName ?? L.unknownApp)
+            sourceName: source?.localizedName ?? L.unknownApp, prefersLongScreenshot: prefersLongScreenshot)
     }
     private func configureScreenRecording(settings: AppSettings, permissions: PermissionService, keys: HotKeyService) {
         recordingPresentation = ScreenRecordingPresentation(coordinator: screenRecorder)

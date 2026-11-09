@@ -136,7 +136,46 @@ Only copying a screenshot or pinned image can add it to history. Recording must 
 
 Screen capture has a separate working-memory guard (100 million pixels across captured displays and per exported bitmap). Capture buffers and annotation previews are released when a session ends; preview/export rendering is serialized off the main actor. Protected content may be blank according to macOS rules. Display-configuration changes cancel an active session; start another capture after the displays settle.
 
-Window snapping, scrolling screenshots, cross-display selections, OCR, recording video, editing flattened pins, and persistent pin recovery are not included.
+跨显示器选区、横向拼接、窗口吸附、文字识别、编辑已展平钉图及退出后恢复钉图暂不支持。
+
+## 自动滚动长截屏
+
+菜单栏选择“长截屏…”后，在单个窗口内框选纵向滚动区域，再点击“开始长截屏”。也可按现有截图快捷键进入普通截图，再点击工具栏中的长截屏按钮；本功能不新增默认全局快捷键。已有标注或撤销记录时须先重新框选，最小选区为八十点见方。框选内容应位于同一块显示器、同一个窗口内，尽量避开窗口圆角和非滚动侧栏。
+
+需要屏幕录制与辅助功能权限；首次请求授权结束当前操作，授权完成后重新开始。框选结束后先等待冻结浮层退场、目标焦点及命中结果连续稳定，再重新采集当前真实画面；这一准备过程有一秒等待上限，尚未开始滚动。前台身份来自系统工作空间，同时检查目标窗口、选区命中与可用的窗口焦点元数据，不要求所有应用都提供系统级辅助功能焦点应用属性。若焦点仍由本应用持有，会交还所选目标；切换到其他应用、目标移动或出现遮挡时直接停止，不反复夺回焦点。随后按不超过选区高度三分之一的小步向下滚动，通过实际画面位移拼接。只处理一个纵向滚动区域，从当前位置开始，结束后页面停在实际滚到的位置。采集期间暂时暂停本应用鼠标增强，结束后恢复原配置。
+
+透明边框和悬浮控制条显示当前像素尺寸，不进入成片；点击“停止并编辑”保留已完成部分，取消或退出键丢弃本次内容。菜单栏也可停止并编辑或取消。持续一秒且至少五次画面检查没有新增内容后自动进入编辑，屏幕流中的短暂重复帧不会立即判为到底。匹配不可靠、页面持续变化、采集失败、目标窗口移动或切换、撤权、锁屏、休眠与显示变化均停止继续滚动；已有可靠内容会在编辑窗口保留，并说明具体原因。系统采集准备或单次取帧超过八秒时停止，取消和停止不必等待尚未返回的系统回调。若首帧尚未取得，只报告启动失败，不显示已保留图片。关闭截图模块会取消整个流程。
+
+采集使用每秒最多三十帧的持续屏幕流，仅保留最新完整帧；原始像素尺寸和颜色空间保持不变。滚动任务每约十六毫秒投递一至十点的小步，图像处理在后台进行；未确认的滚动距离最多为选区高度四分之一，达到预算后等待可靠拼接。高频小步检查前台身份、窗口位置、遮挡与权限，图像处理前后继续完整辅助功能校验。
+
+鼠标可在采集期间自由移动，移出选区不改变自动滚动目标，鼠标指针不进入成片。滚轮直接投递给已锁定的目标进程，携带窗口编号与窗口内坐标，不通过会更新指针位置的全局输入层。窗口内坐标使用按需解析的系统兼容接口；该接口不在公开头文件中，未来系统若不再提供，会停止采集并保留可靠内容，不回退到拉回鼠标的方式。点击其他应用、切换窗口、移动目标或出现遮挡仍按目标保护规则停止。
+
+聊天、文章和文件卡片页面先通过系统视觉框架生成位移候选，再以局部文字细节和纹理签名核验，同时寻找重复内容的竞争位移；必要时仍使用完整重叠搜索。不要求选区的上中下三段都有文字，空白与固定侧栏不参与移动证据投票。内容晚到或匹配暂时失败时暂停滚动，最多等待一点二秒继续读取当前屏幕流，期间不追加不可靠像素；匹配恢复后继续使用此前可靠参考帧。完全重复图案、内容大范围变化或缺少可区分的重叠信息时仍停止，避免重复或缺失行。
+
+实现参考了 [ScrollSnap 的系统图像配准](https://github.com/Brkgng/ScrollSnap/blob/5be0a28f679358be658d4139d16465307f906c87/ScrollSnap/Managers/StitchingManager.swift)及 [SnowShot 的连续采集管线](https://github.com/mg-chao/snow-apps/tree/main/snow_shot/src/presentation/capture)，采用系统框架及独立实现，未引入外部运行依赖。
+
+长图编辑窗口保持前置，初始按宽度适配，可切换“原始比例”，滚动与缩放不会改变标注坐标或输出清晰度。菜单栏“继续编辑长截屏…”可返回当前结果，保留已有标注。支持现有全部标注工具、颜色与粗细，以及撤销、重做、复制、保存和钉图。保存取消或输出失败保留编辑内容；只有复制动作尝试写入历史，继续遵守暂停、模块开关、来源排除、权限和图片容量规则。编辑和导出期间仍占用截图流程，与新截图和录屏互斥。
+
+预览区四周保留二十四点留白，窄图水平居中，短图上下居中；长图从顶部开始查看，超过视口的图片仍可滚动。调整窗口或切换比例后重新计算位置，已滚动的图像位置按原图坐标保持。预览容器与标注画布分开，居中不会改变文字、绘图或导出的坐标。
+
+鼠标悬停在编辑工具栏的图标按钮上时显示功能名称和已有快捷键；灰色的撤销重做按钮也可查看名称，仍保持不可点击。展开后的形状、颜色和粗细选项同样提供名称提示。移出按钮、调整布局、切换焦点或关闭窗口后隐藏提示，提示窗口不接收鼠标输入。
+
+默认最多五万像素高度、一亿总像素或三分钟采集时长，任一触限即停止并保留可靠内容，不降低分辨率。像素增量写入权限受限的临时目录，结束后映射为原始长图，编辑只绘制可见片段；关闭流程后清理临时文件。合成测试不读取系统剪贴板、不请求权限，实机检查仅采集脚本生成的窗口：
+
+```sh
+./scripts/test.sh --filter LongScreenshot
+# 聊天布局与不等间距段落的拼接回归，不需要系统权限。
+./scripts/test.sh --filter LongScreenshotChatTests
+# 独立终端先打开合成长页面；可换成 --web 检查固定顶底栏。
+EASYMACOS_LONG_SCENE=/tmp/easymacos-long-scene.json \
+  swift scripts/long-screenshot-scene.swift --native
+# 另一个终端运行；调用进程必须已获屏幕录制及辅助功能权限。
+EASYMACOS_LIVE_LONG_SCREENSHOT=1 EASYMACOS_LONG_SCENE=/tmp/easymacos-long-scene.json \
+  EASYMACOS_LONG_OUTPUT=/tmp/easymacos-long-output \
+  ./scripts/test.sh --filter LongScreenshotLiveTests
+```
+
+实机检查会将合成窗口置于前台，操作结束后关闭该脚本进程。测试图片与日志保留在临时目录或本地忽略目录，不纳入提交。
 
 ## 鼠标滚动增强
 

@@ -52,13 +52,14 @@ struct CapturedScreen: Sendable {
 }
 
 @MainActor final class ScreenshotCoordinator {
-    enum Phase: Equatable { case idle, capturing, selecting, editing, exporting }
+    enum Phase: Equatable { case idle, capturing, selecting, editing, longCapturing, longEditing, exporting }
     private(set) var phase: Phase = .idle
     private(set) var selectedScreen: CGDirectDisplayID?
     private(set) var windows: [NSPanel] = []
     private var captureTask: Task<Void, Never>?
     private var exportTask: Task<Void, Never>?
     private var keyMonitor: Any?
+    private var longEscapeMonitor: Any?
     private var screenObserver: NSObjectProtocol?
     private var generation = 0
     private var saving = false
@@ -67,6 +68,20 @@ struct CapturedScreen: Sendable {
     private let captureService: any ScreenCapturing
     private let presentWindow: (NSPanel) -> Void
     private let saveImage: (Data) async throws -> Bool
+    private let presentLongWindow: (LongScreenshotEditor) -> Void
+    private let presentLongControls: (NSPanel) -> Void
+    let longCapture: LongScreenshotCoordinator
+    private(set) var longEditor: LongScreenshotEditor?
+    private var longControls: LongScreenshotControls?
+    private var prefersLongScreenshot = false
+    var onLongScrollSuspension: ((Bool) -> Void)?
+    var validateLongAccess: () -> Bool = {
+        let screen = CGPreflightScreenCaptureAccess()
+        let accessibility = AXIsProcessTrusted() && CGPreflightPostEventAccess()
+        if !screen { _ = CGRequestScreenCaptureAccess() }
+        if !accessibility { FinderRenameAccess.request() }
+        return screen && accessibility
+    }
     let pins: PinnedScreenshotManager
     var onCopy: ((ScreenshotImage, String, String) -> Bool)?
     var onError: ((String) -> Void)?
@@ -80,22 +95,37 @@ struct CapturedScreen: Sendable {
         captureService: any ScreenCapturing = SystemScreenCapture(),
         pins: PinnedScreenshotManager = PinnedScreenshotManager(),
         presentWindow: @escaping (NSPanel) -> Void = { $0.makeKeyAndOrderFront(nil) },
-        saveImage: @escaping (Data) async throws -> Bool = { try await ScreenshotFileSaver.save($0) }
+        saveImage: @escaping (Data) async throws -> Bool = { try await ScreenshotFileSaver.save($0) },
+        longCapture: LongScreenshotCoordinator = LongScreenshotCoordinator(),
+        presentLongWindow: @escaping (LongScreenshotEditor) -> Void = { $0.show() },
+        presentLongControls: @escaping (NSPanel) -> Void = { $0.orderFrontRegardless() }
     ) {
         self.captureService = captureService
         self.presentWindow = presentWindow
         self.saveImage = saveImage
         self.pins = pins
+        self.longCapture = longCapture
+        self.presentLongWindow = presentLongWindow
+        self.presentLongControls = presentLongControls
         pins.onCopy = { [weak self] image, id, name in self?.onCopy?(image, id, name) ?? false }
+        longCapture.onScrollSuspension = { [weak self] in self?.onLongScrollSuspension?($0) }
+        longCapture.onProgress = { [weak self] progress in
+            self?.longControls?.state.width = progress.width
+            self?.longControls?.state.height = progress.height
+        }
+        longCapture.onFinish = { [weak self] document, reason, target in
+            self?.presentLongEditor(document, reason: reason, target: target)
+        }
     }
 
-    func start(screens: [ScreenshotScreen], sourceID: String, sourceName: String) {
+    func start(screens: [ScreenshotScreen], sourceID: String, sourceName: String, prefersLongScreenshot: Bool = false) {
         guard isEnabled, !isActive else { return }
         phase = .capturing
         generation += 1
         let version = generation
         self.sourceID = sourceID
         self.sourceName = sourceName
+        self.prefersLongScreenshot = prefersLongScreenshot
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, event.keyCode == 53 else { return event }
             if let text = NSApp.keyWindow?.firstResponder as? NSTextView, text.hasMarkedText() { return event }
@@ -107,7 +137,11 @@ struct CapturedScreen: Sendable {
         screenObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.cancel() }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if self.phase == .longCapturing { self.longCapture.stop(reason: LongScreenshotError.targetChanged.localizedDescription) }
+                else if self.longEditor == nil { self.cancel() }
+            }
         }
         captureTask = Task { [weak self, captureService] in
             do {
@@ -143,6 +177,7 @@ struct CapturedScreen: Sendable {
             panel.isOpaque = true
             panel.backgroundColor = .black
             let view = ScreenshotOverlay(capture: capture, coordinator: self)
+            view.state.prefersLongScreenshot = prefersLongScreenshot
             panel.contentView = view
             windows.append(panel)
         }
@@ -173,8 +208,19 @@ struct CapturedScreen: Sendable {
         exportTask = nil
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         keyMonitor = nil
+        removeLongEscapeMonitor()
         if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
         screenObserver = nil
+        longCapture.cancel()
+        longControls?.close(); longControls = nil
+        longEditor?.close(); longEditor = nil
+        closeSelectionWindows()
+        selectedScreen = nil
+        saving = false
+        phase = .idle
+    }
+
+    private func closeSelectionWindows() {
         for window in windows {
             (window.contentView as? ScreenshotOverlay)?.dispose()
             (window.contentView as? ScreenshotOverlay)?.releaseDisplayResources()
@@ -182,9 +228,106 @@ struct CapturedScreen: Sendable {
             window.close()
         }
         windows.removeAll()
-        selectedScreen = nil
-        saving = false
-        phase = .idle
+    }
+
+    func startLongScreenshot(from view: ScreenshotOverlay) {
+        guard phase == .editing, view.state.canAdjust, view.selection.width >= 80, view.selection.height >= 80 else {
+            view.state.error = LongScreenshotError.selection.localizedDescription
+            view.showToolbar(); return
+        }
+        guard validateLongAccess() else {
+            cancel(); onError?(LongScreenshotError.permission.localizedDescription); return
+        }
+        let region = LongScreenshotRegion(screen: view.capture.screen, selection: view.selection,
+            desktopTop: NSScreen.screens.first?.frame.maxY ?? view.capture.screen.frame.maxY)
+        phase = .longCapturing
+        closeSelectionWindows()
+        longControls = LongScreenshotControls(region: region, stop: { [weak self] in self?.longCapture.stop() },
+            cancel: { [weak self] in self?.cancel() }, present: presentLongControls)
+        longEscapeMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if event.keyCode == 53 { self?.cancel() }
+        }
+        longCapture.start(region)
+    }
+
+    private func presentLongEditor(_ document: LongScreenshotDocument?, reason: String?, target: LongScreenshotTarget?) {
+        guard phase == .longCapturing else { return }
+        removeLongEscapeMonitor()
+        longControls?.close(); longControls = nil
+        guard let document else { cancel(); if let reason { onError?(reason) }; return }
+        if let target { sourceID = target.sourceID; sourceName = target.sourceName }
+        phase = .longEditing
+        let notice = reason.map { message in
+            message + "\n" + L.t("Previously captured content is available for editing.", "此前可靠的截取内容已保留，可继续编辑。")
+        }
+        let editor = LongScreenshotEditor(document: document, notice: notice)
+        longEditor = editor
+        editor.onClose = { [weak self] in self?.cancel() }
+        editor.onOutput = { [weak self] in self?.finishLongScreenshot($0) }
+        presentLongWindow(editor)
+    }
+
+    private func removeLongEscapeMonitor() {
+        if let longEscapeMonitor { NSEvent.removeMonitor(longEscapeMonitor) }
+        longEscapeMonitor = nil
+    }
+
+    func showLongScreenshotEditor() {
+        guard let longEditor else { return }
+        presentLongWindow(longEditor)
+    }
+
+    func stopLongScreenshot() {
+        guard phase == .longCapturing else { return }
+        longControls?.state.stopping = true
+        longCapture.stop()
+    }
+
+    func finishLongScreenshot(_ output: Output) {
+        guard phase == .longEditing, let editor = longEditor else { return }
+        editor.canvas.commitText()
+        let document = editor.document
+        let annotations = editor.state.history.annotations
+        let version = generation
+        phase = .exporting; editor.state.busy = true; editor.state.error = nil
+        editor.state.layoutChanged?()
+        exportTask = Task { [weak self, weak editor, document] in
+            do {
+                if output == .pin {
+                    let archive = try await PinnedImageWorker.shared.archive(base: document.image,
+                        pointSize: document.pointSize, annotations: annotations)
+                    guard let self, let editor, self.generation == version, !Task.isCancelled else { return }
+                    self.pins.show(archive, sourceID: self.sourceID, sourceName: self.sourceName, origin: editor.window.frame.origin)
+                    self.cancel(); return
+                }
+                let image = try await ScreenshotRenderWorker.shared.export(base: document.image,
+                    pointSize: document.pointSize, annotations: annotations)
+                guard let self, let editor, self.generation == version, !Task.isCancelled else { return }
+                switch output {
+                case .copy:
+                    guard self.onCopy?(image, self.sourceID, self.sourceName) == true else {
+                        throw CocoaError(.fileWriteUnknown, userInfo: [NSLocalizedDescriptionKey:
+                            L.t("Could not write to the clipboard. Try again.", "无法写入剪贴板，请重试。")])
+                    }
+                case .save:
+                    self.saving = true
+                    let saved = try await self.saveImage(image.png)
+                    guard self.generation == version, !Task.isCancelled else { return }
+                    self.saving = false
+                    if !saved { self.restoreLongEditor(editor); return }
+                case .pin: break
+                }
+                self.cancel()
+            } catch {
+                guard let self, let editor, self.generation == version else { return }
+                self.restoreLongEditor(editor)
+                editor.state.error = error.localizedDescription; editor.state.layoutChanged?()
+            }
+        }
+    }
+    private func restoreLongEditor(_ editor: LongScreenshotEditor) {
+        saving = false; phase = .longEditing; editor.state.busy = false
+        editor.state.layoutChanged?(); presentLongWindow(editor)
     }
 
     enum Output { case copy, save, pin }

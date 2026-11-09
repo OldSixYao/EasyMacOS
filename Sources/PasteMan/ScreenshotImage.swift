@@ -106,55 +106,66 @@ enum ScreenshotImageError: Error, LocalizedError {
 
 /// Shared by preview and export. Uses Core Graphics / Core Text only, safe off the main actor.
 enum ScreenshotRenderer {
+    static let mosaicCacheLimit = 16 * 1024 * 1024
     static func render(
         base: CGImage, pointSize: CGSize, annotations: [ScreenshotAnnotation],
-        maximumDimension: Int? = nil
+        maximumDimension: Int? = nil, region: CGRect? = nil
     ) throws -> CGImage {
-        let reduction = maximumDimension.map { min(1, CGFloat($0) / CGFloat(max(base.width, base.height))) } ?? 1
-        let w = max(1, Int(CGFloat(base.width) * reduction))
-        let h = max(1, Int(CGFloat(base.height) * reduction))
-        // Bound allocation separately from the clipboard history's admission limits.
-        guard w <= 100_000_000 / h, pointSize.width > 0, pointSize.height > 0,
-            let context = CGContext(
-                data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
-                space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        let area = region ?? CGRect(origin: .zero, size: pointSize)
+        guard pointSize.width > 0, pointSize.height > 0, area.width > 0, area.height > 0 else {
+            throw ScreenshotImageError.invalidSelection
+        }
+        let pixelWidth = area.width * CGFloat(base.width) / pointSize.width
+        let pixelHeight = area.height * CGFloat(base.height) / pointSize.height
+        let reduction = maximumDimension.map { min(1, CGFloat($0) / max(pixelWidth, pixelHeight)) } ?? 1
+        var mosaics: [Int: CGImage] = [:]
+        return try renderRegion(base: base, pointSize: pointSize, annotations: annotations, count: annotations.count,
+            area: area, width: max(1, Int((pixelWidth * reduction).rounded())),
+            height: max(1, Int((pixelHeight * reduction).rounded())), mosaics: &mosaics)
+    }
+
+    private static func renderRegion(base: CGImage, pointSize: CGSize, annotations: [ScreenshotAnnotation], count: Int,
+                                     area: CGRect, width: Int, height: Int, mosaics: inout [Int: CGImage]) throws -> CGImage {
+        try Task.checkCancellation()
+        guard width > 0, height > 0, width <= 100_000_000 / height,
+            let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
         else { throw ScreenshotImageError.allocationFailed }
-        context.translateBy(x: 0, y: CGFloat(h))
-        context.scaleBy(x: CGFloat(w) / pointSize.width, y: -CGFloat(h) / pointSize.height)
-        drawImage(base, in: CGRect(origin: .zero, size: pointSize), context: context)
-        for annotation in annotations {
+        context.translateBy(x: 0, y: CGFloat(height))
+        context.scaleBy(x: CGFloat(width) / area.width, y: -CGFloat(height) / area.height)
+        context.translateBy(x: -area.minX, y: -area.minY)
+        let pixels = ScreenshotGeometry.pixelRect(area, pointSize: pointSize,
+            pixelSize: CGSize(width: base.width, height: base.height))
+        guard let crop = base.cropping(to: pixels) else { throw ScreenshotImageError.invalidSelection }
+        let baseRect = CGRect(x: pixels.minX * pointSize.width / CGFloat(base.width),
+            y: pixels.minY * pointSize.height / CGFloat(base.height),
+            width: pixels.width * pointSize.width / CGFloat(base.width),
+            height: pixels.height * pointSize.height / CGFloat(base.height))
+        drawImage(crop, in: baseRect, context: context)
+        for index in 0..<count {
             try Task.checkCancellation()
+            let annotation = annotations[index]
             if annotation.tool == .mosaic {
                 let rect = annotation.rect.intersection(CGRect(origin: .zero, size: pointSize))
-                guard !rect.isNull, rect.width > 0, rect.height > 0, let snapshot = context.makeImage() else {
-                    continue
-                }
-                let pixels = ScreenshotGeometry.pixelRect(
-                    rect, pointSize: pointSize,
-                    pixelSize: CGSize(width: w, height: h))
-                guard let crop = snapshot.cropping(to: pixels) else { throw ScreenshotImageError.allocationFailed }
-                let block = max(8, annotation.width * 4)
-                let cols = max(1, Int(rect.width / block))
-                let rows = max(1, Int(rect.height / block))
-                guard
-                    let small = CGContext(
-                        data: nil, width: cols, height: rows, bitsPerComponent: 8, bytesPerRow: 0,
-                        space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+                guard !rect.isNull, rect.width > 0, rect.height > 0, rect.intersects(area) else { continue }
+                let pixelated: CGImage
+                if let cached = mosaics[index] { pixelated = cached }
                 else {
-                    throw ScreenshotImageError.allocationFailed
+                    // 在全局标注坐标中生成马赛克格子。预览片段与整图导出使用相同格点，
+                    // 跨片段滚动时不会重新起格，也不需要为整个马赛克区域分配原尺寸位图。
+                    let block = max(8, annotation.width * 4)
+                    pixelated = try renderRegion(base: base, pointSize: pointSize, annotations: annotations, count: index,
+                        area: rect, width: max(1, Int(rect.width / block)), height: max(1, Int(rect.height / block)), mosaics: &mosaics)
+                    let cost = pixelated.bytesPerRow * pixelated.height
+                    let cachedBytes = mosaics.values.reduce(0) { $0 + $1.bytesPerRow * $1.height }
+                    if cachedBytes > mosaicCacheLimit - min(cost, mosaicCacheLimit) { mosaics.removeAll() }
+                    if cost <= mosaicCacheLimit { mosaics[index] = pixelated }
                 }
-                small.interpolationQuality = .low
-                small.draw(crop, in: CGRect(x: 0, y: 0, width: cols, height: rows))
-                guard let pixelated = small.makeImage() else { throw ScreenshotImageError.allocationFailed }
                 context.saveGState()
                 context.interpolationQuality = .none
                 drawImage(pixelated, in: rect, context: context)
                 context.restoreGState()
-            } else {
-                draw(annotation, in: context)
-            }
+            } else { draw(annotation, in: context) }
         }
         guard let result = context.makeImage() else { throw ScreenshotImageError.allocationFailed }
         return result
@@ -276,10 +287,12 @@ actor ScreenshotRenderWorker {
         try Task.checkCancellation()
         let image = try autoreleasepool {
             if let session, let previous = checkpoint, previous.session == session, previous.size == pointSize,
-                annotations.starts(with: previous.annotations) {
+                annotations.starts(with: previous.annotations),
+                !annotations.dropFirst(previous.annotations.count).contains(where: { $0.tool == .mosaic }) {
                 return try ScreenshotRenderer.render(base: previous.image, pointSize: pointSize,
                     annotations: Array(annotations.dropFirst(previous.annotations.count)), maximumDimension: 1800)
             }
+            // 新增马赛克必须从原图和此前标注生成格点，不能再次采样已缩小的预览。
             return try ScreenshotRenderer.render(
                 base: base, pointSize: pointSize, annotations: annotations, maximumDimension: 1800)
         }
