@@ -45,7 +45,7 @@ do {
     let application = AXUIElementCreateApplication(app.processIdentifier)
     let windows = attribute(application, kAXWindowsAttribute) as? [AXUIElement] ?? []
     let labels = [["通用", "General"], ["截图", "Screenshots"], ["剪贴板", "Clipboard"],
-                  ["右键菜单", "Context Menu"], ["鼠标", "Mouse"], ["权限", "Permissions"]]
+                  ["右键菜单", "Context Menu"], ["鼠标", "Mouse"], ["权限", "Permissions"], ["录屏", "Recording"]]
     func tabs(in window: AXUIElement) -> [AXUIElement] {
         let all = elements(window)
         return labels.compactMap { titles in
@@ -57,7 +57,7 @@ do {
         }
     }
     guard let window = windows.first(where: { tabs(in: $0).count == labels.count }) else {
-        throw SettingsFailure(description: "找不到包含六个标签项的设置窗口。")
+        throw SettingsFailure(description: "找不到包含七个标签项的设置窗口。")
     }
     let original = tabs(in: window).firstIndex { flag($0, kAXSelectedAttribute) } ?? 0
     app.activate()
@@ -82,7 +82,8 @@ do {
         case 2: pageMatches = text.contains("保留时间") || text.contains("Keep history")
         case 3: pageMatches = text.contains("启用右键菜单") || text.contains("Enable context menu")
         case 4: pageMatches = text.contains("启用鼠标增强") || text.contains("Enable mouse enhancement")
-        default: pageMatches = text.contains("访达扩展") || text.contains("Finder Extension")
+        case 5: pageMatches = text.contains("访达扩展") || text.contains("Finder Extension")
+        default: pageMatches = text.contains("启用录屏") || text.contains("Enable screen recording")
         }
         let focused = current.indices.filter { flag(current[$0], kAXFocusedAttribute) }
         return pageMatches && current.count == labels.count
@@ -94,16 +95,16 @@ do {
         print("通过：指定标签打开后，页面及唯一选中项正确，无其他标签残留焦点。")
     }
     defer { try? press(original) }
-    for index in [2, 0, 5, 4, 1, 3, 2] {
+    for index in [2, 0, 5, 4, 6, 1, 3, 2] {
         try press(index)
         try require(waitFor { matches(index) }, "第 \(index + 1) 个标签的焦点与唯一选中状态不一致。")
     }
     print("通过：逐项点击后，焦点、唯一选中项与页面内容一致。")
-    for index in [3, 4, 5, 0, 1, 2] {
+    for index in [3, 4, 5, 6, 0, 1, 2] {
         key(CGKeyCode(kVK_RightArrow), pid: app.processIdentifier)
         try require(waitFor { matches(index) }, "向右切换后，焦点与选中状态不一致。")
     }
-    for index in [1, 0, 5, 4, 3, 2] {
+    for index in [1, 0, 6, 5, 4, 3, 2] {
         key(CGKeyCode(kVK_LeftArrow), pid: app.processIdentifier)
         try require(waitFor { matches(index) }, "向左切换后，焦点与选中状态不一致。")
     }

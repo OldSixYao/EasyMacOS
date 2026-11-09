@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Carbon
 import FinderMenuCore
 import PasteManCore
@@ -30,6 +31,7 @@ import SwiftUI
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
     let updates: any UpdateChecking
     private var statusItem: NSStatusItem!
+    private var recordingStatusSymbol: String?
     private var panel: HistoryPanel?
     private var settingsWindow: NSWindow?
     private var welcomeWindow: NSWindow?
@@ -37,8 +39,12 @@ import SwiftUI
     private var monitor: ClipboardMonitor?
     private var hotKeys: HotKeyService?
     private var screenshots: ScreenshotCoordinator?
+    private let screenRecorder = ScreenRecordingCoordinator()
+    private var recordingPresentation: ScreenRecordingPresentation?
+    private var recordingScreenObserver: NSObjectProtocol?
+    private var waitingToTerminate = false
     private var modules: ModuleController?
-    private var outsideMonitor: Any?
+    private let outsideClicks = HistoryOutsideClickMonitor()
     private var lastExternalApp: NSRunningApplication?
     private var workspaceObserver: NSObjectProtocol?
     private var sessionObservers: [NSObjectProtocol] = []
@@ -64,6 +70,8 @@ import SwiftUI
             print("Application: \(Bundle.main.bundleURL.path)")
             print("Accessibility object access: \(AXIsProcessTrusted())")
             print("Keyboard event posting: \(CGPreflightPostEventAccess())")
+            print("Screen recording: \(CGPreflightScreenCaptureAccess())")
+            print("Microphone: \(AVCaptureDevice.authorizationStatus(for: .audio).rawValue)")
             NSApp.terminate(nil)
             return
         }
@@ -87,8 +95,9 @@ import SwiftUI
                 clipboard: SystemClipboard(), repository: repository, settings: settings, permissions: permissions)
             monitor = watcher
             for (name, reason) in [(NSWorkspace.willSleepNotification, "sleep"), (NSWorkspace.sessionDidResignActiveNotification, "session"), (NSWorkspace.screensDidSleepNotification, "display")] {
-                sessionObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak watcher, weak mouseScroll] _ in
+                sessionObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self, weak watcher, weak mouseScroll] _ in
                     MainActor.assumeIsolated {
+                        self?.screenRecorder.stop()
                         watcher?.setSessionActive(false, reason: reason)
                         mouseScroll?.setSessionActive(false, reason: reason)
                     }
@@ -103,8 +112,9 @@ import SwiftUI
                 })
             }
             for (name, active) in [("com.apple.screenIsLocked", false), ("com.apple.screenIsUnlocked", true)] {
-                lockObservers.append(DistributedNotificationCenter.default().addObserver(forName: Notification.Name(name), object: nil, queue: .main) { [weak watcher, weak mouseScroll] _ in
+                lockObservers.append(DistributedNotificationCenter.default().addObserver(forName: Notification.Name(name), object: nil, queue: .main) { [weak self, weak watcher, weak mouseScroll] _ in
                     MainActor.assumeIsolated {
+                        if !active { self?.screenRecorder.stop() }
                         watcher?.setSessionActive(active, reason: "lock")
                         mouseScroll?.setSessionActive(active, reason: "lock")
                     }
@@ -126,6 +136,7 @@ import SwiftUI
             keys.onInvoke = { [weak self] in self?.togglePanel(fromMenuBar: false) }
             let screenshotController = ScreenshotCoordinator()
             screenshots = screenshotController
+            configureScreenRecording(settings: settings, permissions: permissions, keys: keys)
             keys.onScreenshot = { [weak self] in self?.startScreenshot() }
             screenshotController.onError = { message in
                 let alert = NSAlert()
@@ -162,6 +173,7 @@ import SwiftUI
             }
             let modules = ModuleController(settings: settings, hotKeys: keys, monitor: watcher, screenshots: screenshotController)
             self.modules = modules
+            modules.onScreenRecordingDisabled = { [weak self] in self?.screenRecorder.stop() }
             modules.onClipboardDisabled = { [weak self, weak state] in
                 state?.suspendClipboard()
                 self?.hidePanel()
@@ -238,6 +250,7 @@ import SwiftUI
 
     @objc private func interfaceLanguageChanged() {
         setupMainMenu()
+        recordingStatusSymbol = nil
         refreshRecordingStatus()
         settingsWindow?.title = L.t("EasyMacOS Settings", "EasyMacOS 设置")
         model?.finderModel.setLanguage(L.language)
@@ -293,6 +306,26 @@ import SwiftUI
     }
     private func refreshRecordingStatus() {
         guard let model, let button = statusItem?.button else { return }
+        if screenRecorder.isActive {
+            let symbol: String
+            switch screenRecorder.phase {
+            case .paused: symbol = "pause.circle.fill"
+            case .saving, .stopping, .pausing: symbol = "arrow.down.circle"
+            case .failed: symbol = "exclamationmark.circle"
+            default: symbol = "record.circle"
+            }
+            if recordingStatusSymbol != symbol {
+                recordingStatusSymbol = symbol
+                button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: L.t("Screen recording", "屏幕录制"))
+                button.image?.isTemplate = false
+                button.contentTintColor = screenRecorder.phase == .paused ? .systemOrange : .systemRed
+            }
+            let label = L.t("Screen recording", "屏幕录制") + " " + screenRecorder.timeLabel
+            if button.toolTip != label { button.toolTip = label }
+            return
+        }
+        recordingStatusSymbol = nil
+        button.contentTintColor = nil
         RecordingStatusAppearance(paused: model.settings.paused, applicationLabel: AppVersion.current.applicationLabel,
                                   clipboardEnabled: model.settings.clipboardEnabled)
             .apply(to: button)
@@ -311,12 +344,9 @@ import SwiftUI
                 self?.hidePanel()
             }
         }
-        outsideMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) {
-            [weak self] _ in self?.hidePanel()
-        }
     }
     @objc private func statusClicked() {
-        if NSApp.currentEvent?.type == .rightMouseUp || model?.settings.clipboardEnabled == false {
+        if NSApp.currentEvent?.type == .rightMouseUp || model?.settings.clipboardEnabled == false || screenRecorder.isActive {
             showMenu()
         } else {
             // A menu-bar click always opens history, even if focus loss just dismissed the panel.
@@ -331,7 +361,7 @@ import SwiftUI
         }
     }
     private func showPanel(fromMenuBar: Bool) {
-        guard screenshots?.isActive != true else { return }
+        guard screenshots?.isActive != true, screenRecorder.phase != .selecting, screenRecorder.phase != .countdown else { return }
         guard let model, model.settings.clipboardEnabled else { return }
         if !model.settings.hasOnboarded {
             showWelcome()
@@ -359,6 +389,7 @@ import SwiftUI
         origin.y = max(visible.minY + 8, min(origin.y, visible.maxY - size.height))
         panel.setFrameOrigin(origin)
         panel.makeKeyAndOrderFront(nil)
+        outsideClicks.start { [weak self] in self?.hidePanel() }
     }
     private func createPanel(_ model: AppModel) {
         let panel = HistoryPanel()
@@ -398,6 +429,7 @@ import SwiftUI
         self.panel = panel
     }
     func hidePanel() {
+        outsideClicks.stop()
         panel?.orderOut(nil)
         // Release thumbnail views and cancel their tasks while history is hidden.
         panel?.contentView = nil
@@ -422,7 +454,36 @@ import SwiftUI
         menu.addItem(.separator())
         addMenu(
             menu, L.t("Screenshot", "截图") + "  " + model.settings.screenshotShortcut.label, #selector(startScreenshot),
-            enabled: model.settings.screenshotEnabled)
+            enabled: model.settings.screenshotEnabled && !screenRecorder.isActive)
+        if !screenRecorder.isActive {
+            addMenu(menu, HotKeyAction.recordFullScreen.title + "  " + model.settings.shortcut(for: .recordFullScreen).label,
+                    #selector(startFullScreenRecording), enabled: model.settings.screenRecordingEnabled && screenshots?.isActive != true)
+            addMenu(menu, HotKeyAction.recordRegion.title + "  " + model.settings.shortcut(for: .recordRegion).label,
+                    #selector(startRegionRecording), enabled: model.settings.screenRecordingEnabled && screenshots?.isActive != true)
+            if !screenRecorder.pendingRecoveries.isEmpty {
+                let recovery = NSMenuItem(title: L.t("Recover unfinished recording", "恢复未完成录屏"), action: nil, keyEquivalent: "")
+                let submenu = NSMenu()
+                let date = DateFormatter()
+                date.dateFormat = "yyyy-MM-dd HH:mm:ss"
+                for (index, url) in screenRecorder.pendingRecoveries.enumerated() {
+                    let created = (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast
+                    let title = "\(index + 1). " + date.string(from: created)
+                    let item = NSMenuItem(title: title, action: #selector(recoverScreenRecording(_:)), keyEquivalent: "")
+                    item.target = self
+                    item.representedObject = url
+                    submenu.addItem(item)
+                }
+                recovery.submenu = submenu
+                menu.addItem(recovery)
+            }
+        } else {
+            addMenu(menu, L.t("Screen recording", "屏幕录制") + "  " + screenRecorder.timeLabel, #selector(showRecordingControls))
+            if screenRecorder.isCapturing {
+                addMenu(menu, screenRecorder.phase == .paused ? L.t("Resume screen recording", "继续录屏") : L.t("Pause screen recording", "暂停录屏"), #selector(pauseScreenRecording))
+            }
+            addMenu(menu, L.t("Stop screen recording", "停止录屏") + "  " + model.settings.shortcut(for: .recordStop).label,
+                    #selector(stopScreenRecording), enabled: screenRecorder.phase != .saving && screenRecorder.phase != .failed)
+        }
         addMenu(menu, L.t("Close all pinned screenshots", "关闭所有钉图"), #selector(closeAllPins))
         addMenu(menu, L.t("Finder menu…", "访达右键…"), #selector(showFinderSettings))
         menu.addItem(.separator())
@@ -449,7 +510,7 @@ import SwiftUI
         menu.addItem(item)
     }
     @objc private func startScreenshot() {
-        guard let model, model.settings.screenshotEnabled, screenshots?.isActive != true else { return }
+        guard let model, model.settings.screenshotEnabled, screenshots?.isActive != true, !screenRecorder.isActive else { return }
         guard model.settings.hasOnboarded else {
             showWelcome()
             return
@@ -472,6 +533,60 @@ import SwiftUI
         screenshots?.start(
             screens: screens, sourceID: source?.bundleIdentifier ?? "unknown",
             sourceName: source?.localizedName ?? L.unknownApp)
+    }
+    private func configureScreenRecording(settings: AppSettings, permissions: PermissionService, keys: HotKeyService) {
+        recordingPresentation = ScreenRecordingPresentation(coordinator: screenRecorder)
+        keys.onScreenRecording = { [weak self] action in
+            switch action {
+            case .recordFullScreen: self?.startFullScreenRecording()
+            case .recordRegion: self?.startRegionRecording()
+            case .recordPause: self?.pauseScreenRecording()
+            case .recordStop: self?.stopScreenRecording()
+            default: break
+            }
+        }
+        screenRecorder.validateAccess = { [weak permissions] options in
+            guard let permissions else { throw ScreenRecordingError.unavailable }
+            permissions.refresh()
+            if !permissions.screenRecording {
+                permissions.requestScreenRecording()
+                throw NSError(domain: "ScreenRecording", code: 1, userInfo: [NSLocalizedDescriptionKey:
+                    L.t("Allow Screen Recording in System Settings, then start again.", "请在系统设置中允许屏幕录制，然后重新开始。")])
+            }
+            if options.microphone {
+                if permissions.microphone == .notDetermined { await permissions.requestMicrophone() }
+                guard permissions.microphone == .authorized else {
+                    throw NSError(domain: "ScreenRecording", code: 2, userInfo: [NSLocalizedDescriptionKey:
+                        L.t("Microphone access is required. Enable it in Settings, or turn off microphone recording.", "需要麦克风权限，请在设置中授权，或关闭录制麦克风后重试。")])
+                }
+            }
+        }
+        screenRecorder.onChange = { [weak self] in
+            guard let self else { return }
+            self.refreshRecordingStatus()
+            if self.waitingToTerminate && (self.screenRecorder.phase == .idle || self.screenRecorder.phase == .failed) {
+                self.waitingToTerminate = false
+                NSApp.reply(toApplicationShouldTerminate: self.screenRecorder.phase == .idle)
+            }
+        }
+        recordingScreenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+        ) { [weak self] _ in MainActor.assumeIsolated { self?.screenRecorder.stop() } }
+        if let recovery = screenRecorder.pendingRecoveries.first { screenRecorder.recover(recovery) }
+    }
+    private func startScreenRecording(_ mode: ScreenRecordingCoordinator.Mode) {
+        guard let model, model.settings.screenRecordingEnabled, !screenRecorder.isActive, screenshots?.isActive != true else { return }
+        guard model.settings.hasOnboarded else { showWelcome(); return }
+        hidePanel()
+        screenRecorder.select(mode: mode, options: model.settings.screenRecordingOptions)
+    }
+    @objc private func startFullScreenRecording() { startScreenRecording(.fullScreen) }
+    @objc private func startRegionRecording() { startScreenRecording(.region) }
+    @objc private func pauseScreenRecording() { screenRecorder.togglePause() }
+    @objc private func stopScreenRecording() { screenRecorder.stop() }
+    @objc private func showRecordingControls() { screenRecorder.onShowControls?() }
+    @objc private func recoverScreenRecording(_ sender: NSMenuItem) {
+        if let recovery = sender.representedObject as? URL { screenRecorder.recover(recovery) }
     }
     @objc private func closeAllPins() { screenshots?.pins.closeAll() }
 
@@ -550,14 +665,25 @@ import SwiftUI
         welcomeWindow?.makeKeyAndOrderFront(nil)
     }
     @objc private func quit() { NSApp.terminate(nil) }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if screenRecorder.phase == .selecting || screenRecorder.phase == .countdown { screenRecorder.cancelSelection() }
+        guard screenRecorder.isActive else { return .terminateNow }
+        if screenRecorder.phase == .failed { showRecordingControls(); return .terminateCancel }
+        waitingToTerminate = true
+        Task { @MainActor [weak self] in self?.screenRecorder.stop() }
+        return .terminateLater
+    }
     func applicationWillTerminate(_ notification: Notification) {
+        recordingPresentation?.dismissSelection()
+        recordingPresentation?.closeControls()
+        if let recordingScreenObserver { NotificationCenter.default.removeObserver(recordingScreenObserver) }
         modules?.stop()
         screenshots?.cancel()
         screenshots?.pins.closeAll()
         monitor?.stop()
         model?.mouseScroll.stop()
         hotKeys?.stop()
-        if let outsideMonitor { NSEvent.removeMonitor(outsideMonitor) }
+        outsideClicks.stop()
         if let workspaceObserver { NSWorkspace.shared.notificationCenter.removeObserver(workspaceObserver) }
         for observer in sessionObservers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
         for observer in lockObservers { DistributedNotificationCenter.default().removeObserver(observer) }

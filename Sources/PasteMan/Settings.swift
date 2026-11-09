@@ -65,6 +65,42 @@ struct Shortcut: Codable, Equatable {
             if oldValue != screenshotEnabled { onScreenshotChanged?() }
         }
     }
+    @ObservationIgnored var onScreenRecordingChanged: (() -> Void)?
+    var screenRecordingEnabled: Bool {
+        didSet {
+            defaults.set(screenRecordingEnabled, forKey: "screenRecordingEnabled")
+            if oldValue != screenRecordingEnabled { onScreenRecordingChanged?() }
+        }
+    }
+    var screenRecordingOptions: ScreenRecordingOptions {
+        didSet {
+            if let data = try? JSONEncoder().encode(screenRecordingOptions) { defaults.set(data, forKey: "screenRecordingOptions") }
+        }
+    }
+    private var recordingShortcuts: [String: Shortcut]
+    func shortcut(for action: HotKeyAction) -> Shortcut {
+        switch action {
+        case .history: shortcut
+        case .screenshot: screenshotShortcut
+        default: recordingShortcuts[String(action.rawValue)] ?? action.defaultShortcut
+        }
+    }
+    func moduleEnabled(for action: HotKeyAction) -> Bool {
+        switch action {
+        case .history: clipboardEnabled
+        case .screenshot: screenshotEnabled
+        default: screenRecordingEnabled
+        }
+    }
+    func setShortcut(_ value: Shortcut, for action: HotKeyAction) {
+        switch action {
+        case .history: shortcut = value
+        case .screenshot: screenshotShortcut = value
+        default:
+            recordingShortcuts[String(action.rawValue)] = value
+            if let data = try? JSONEncoder().encode(recordingShortcuts) { defaults.set(data, forKey: "recordingShortcuts") }
+        }
+    }
     @ObservationIgnored var onMouseChanged: (() -> Void)?
     private var storedMouse: MouseScrollConfiguration
     var mouse: MouseScrollConfiguration {
@@ -112,6 +148,11 @@ struct Shortcut: Codable, Equatable {
         showInDock = defaults.bool(forKey: "showInDock")
         clipboardEnabled = defaults.object(forKey: "clipboardEnabled") as? Bool ?? true
         screenshotEnabled = defaults.object(forKey: "screenshotEnabled") as? Bool ?? true
+        screenRecordingEnabled = defaults.object(forKey: "screenRecordingEnabled") as? Bool ?? true
+        screenRecordingOptions = defaults.data(forKey: "screenRecordingOptions")
+            .flatMap { try? JSONDecoder().decode(ScreenRecordingOptions.self, from: $0) } ?? .init()
+        recordingShortcuts = defaults.data(forKey: "recordingShortcuts")
+            .flatMap { try? JSONDecoder().decode([String: Shortcut].self, from: $0) } ?? [:]
         storedMouse = defaults.data(forKey: "mouseScrollConfiguration")
             .flatMap { try? JSONDecoder().decode(MouseScrollConfiguration.self, from: $0) }?.normalized ?? .init()
         shortcut =

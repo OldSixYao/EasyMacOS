@@ -16,6 +16,8 @@ import PasteManCore
     private(set) var loadingMore = false
     private(set) var hasMore = false
     private var nextPage: HistoryCursor?
+    @ObservationIgnored private var firstPageCursor: HistoryCursor?
+    @ObservationIgnored private var firstPageHasMore = false
     private var pageTask: Task<Void, Never>?
     var search = ""
     var filter = HistoryFilter.all
@@ -25,7 +27,17 @@ import PasteManCore
     var recordingIssue: String?
     var shortcutIssues: [HotKeyAction: String] = [:]
     var preview: HistoryEntry?
-    var panelVisible = false
+    var panelVisible = false {
+        didSet {
+            guard oldValue != panelVisible else { return }
+            if panelVisible {
+                idleReleaseTask?.cancel()
+                idleReleaseTask = nil
+            } else {
+                retainFirstPageWhileHidden()
+            }
+        }
+    }
     var onClose: (() -> Void)?
     var onSettings: (() -> Void)?
     var onMenu: (() -> Void)?
@@ -41,12 +53,15 @@ import PasteManCore
     private var clipboardRevision = 0
     private let pasteExecutor: any PasteExecuting
     private let clipboardWriter: any ClipboardWriting
+    @ObservationIgnored private var idleReleaseTask: Task<Void, Never>?
+    @ObservationIgnored private var pressureSource: DispatchSourceMemoryPressure?
+    @ObservationIgnored private let hiddenRetention: Duration
 
     init(
         repository: any HistoryRepository, settings: AppSettings, permissions: PermissionService,
         hotKeys: HotKeyService, pasteExecutor: any PasteExecuting = SystemPasteExecutor(),
         clipboardWriter: any ClipboardWriting = SystemClipboard(), finderModel: FinderModel = FinderModel(),
-        updates: any UpdateChecking = UpdateController()
+        updates: any UpdateChecking = UpdateController(), hiddenRetention: Duration = .seconds(15)
     ) {
         self.repository = repository
         self.settings = settings
@@ -61,6 +76,17 @@ import PasteManCore
         self.finderModel = finderModel
         self.pasteExecutor = pasteExecutor
         self.clipboardWriter = clipboardWriter
+        self.hiddenRetention = hiddenRetention
+        let pressure = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
+        pressure.setEventHandler { [weak self] in
+            MainActor.assumeIsolated { self?.releaseHiddenResources() }
+        }
+        pressure.resume()
+        pressureSource = pressure
+    }
+    deinit {
+        idleReleaseTask?.cancel()
+        pressureSource?.cancel()
     }
     func refresh() {
         guard settings.clipboardEnabled else { return }
@@ -90,6 +116,8 @@ import PasteManCore
                 entries = rows
                 nextPage = page.next
                 hasMore = page.next != nil
+                firstPageCursor = page.next
+                firstPageHasMore = hasMore
                 if let apps {
                     sources = apps
                     sourcesRevision = sourceVersion
@@ -134,6 +162,40 @@ import PasteManCore
         panelVisible = false
         preview = nil
         cancelRefresh()
+        releaseHiddenResources()
+    }
+    private func retainFirstPageWhileHidden() {
+        preview = nil
+        target = nil
+        cancelRefresh()
+        if entries.count > 100 {
+            entries = Array(entries.prefix(100))
+            nextPage = firstPageCursor
+            hasMore = firstPageHasMore
+            if !entries.contains(where: { $0.id == selection }) { selection = entries.first?.id }
+        }
+        ThumbnailCache.shared.retain(Set(entries.map(\.id)))
+        idleReleaseTask?.cancel()
+        let delay = hiddenRetention
+        idleReleaseTask = Task { [weak self] in
+            do { try await Task.sleep(for: delay) } catch { return }
+            self?.releaseHiddenResources()
+        }
+    }
+    func releaseHiddenResources() {
+        guard !panelVisible else { return }
+        idleReleaseTask?.cancel()
+        idleReleaseTask = nil
+        cancelRefresh()
+        entries = []
+        sources = []
+        sourcesRevision = -1
+        selection = nil
+        nextPage = nil
+        firstPageCursor = nil
+        firstPageHasMore = false
+        hasMore = false
+        ThumbnailCache.shared.removeAll()
     }
     func loadMore(selectNext: Bool = false) {
         guard settings.clipboardEnabled, !loading, !loadingMore, let cursor = nextPage else { return }
@@ -242,10 +304,10 @@ import PasteManCore
         }
     }
     func applyShortcut(_ shortcut: Shortcut, for action: HotKeyAction = .history) -> Bool {
-        let enabled = action == .history ? settings.clipboardEnabled : settings.screenshotEnabled
-        let other = action == .history ? settings.screenshotShortcut : settings.shortcut
-        if !shortcut.matches(other), !enabled || hotKeys.register(shortcut, for: action) {
-            if action == .history { settings.shortcut = shortcut } else { settings.screenshotShortcut = shortcut }
+        let enabled = settings.moduleEnabled(for: action)
+        let conflict = HotKeyAction.allCases.contains { $0 != action && settings.shortcut(for: $0).matches(shortcut) }
+        if !conflict, !enabled || hotKeys.register(shortcut, for: action) {
+            settings.setShortcut(shortcut, for: action)
             shortcutIssues[action] = nil
             message = nil
             return true

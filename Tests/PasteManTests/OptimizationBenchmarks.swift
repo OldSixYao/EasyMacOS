@@ -99,6 +99,7 @@ import Testing
         }
         await pins.waitForDisplays()
         report.values["八张钉图创建_毫秒"] = [benchmarkMilliseconds(start.duration(to: .now))]
+        report.values["八张钉图显示请求数"] = [Double(pins.displayDecodeCount)]
         try await Task.sleep(for: .milliseconds(300))
         let activePins = try benchmarkFootprint()
         pinSamples.append(activePins)

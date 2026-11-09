@@ -77,7 +77,16 @@ final class PinnedImageStorage: Sendable {
 
 actor PinnedImageWorker {
     static let shared = PinnedImageWorker()
-    func archive(base: CGImage, pointSize: CGSize, annotations: [ScreenshotAnnotation]) throws -> PinnedImageStorage {
+    func archive(base: CGImage, pointSize: CGSize, annotations: [ScreenshotAnnotation]) async throws -> PinnedImageStorage {
+        let cost = base.bytesPerRow * base.height * (annotations.isEmpty ? 1 : 2)
+        if let result = try ImageWorkBudget.shared.performIfAvailable(estimatedBytes: cost, operation: {
+            try archiveAdmitted(base: base, pointSize: pointSize, annotations: annotations)
+        }) { return result }
+        return try await ImageWorkBudget.shared.withPermit(estimatedBytes: cost, priority: .userInitiated) {
+            try await self.archiveAdmitted(base: base, pointSize: pointSize, annotations: annotations)
+        }
+    }
+    private func archiveAdmitted(base: CGImage, pointSize: CGSize, annotations: [ScreenshotAnnotation]) throws -> PinnedImageStorage {
         try Task.checkCancellation()
         guard pointSize.width.isFinite, pointSize.height.isFinite, pointSize.width > 0, pointSize.height > 0,
             base.height > 0, base.width <= 100_000_000 / base.height else { throw ScreenshotImageError.allocationFailed }
@@ -102,7 +111,17 @@ actor PinnedImageWorker {
             let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { throw ScreenshotImageError.allocationFailed }
         return image
     }
-    func png(url: URL, rawSize: CGSize?) throws -> Data {
+    func png(url: URL, rawSize: CGSize?) async throws -> Data {
+        let cost = rawSize.map { Int($0.width) * Int($0.height) * 4 } ?? 1
+        if let result = try ImageWorkBudget.shared.performIfAvailable(estimatedBytes: cost, operation: {
+            try pngAdmitted(url: url, rawSize: rawSize)
+        }) { return result }
+        return try await ImageWorkBudget.shared.withPermit(estimatedBytes: cost, priority: .userInitiated) {
+            try await self.pngAdmitted(url: url, rawSize: rawSize)
+        }
+    }
+    private func pngAdmitted(url: URL, rawSize: CGSize?) throws -> Data {
+        try Task.checkCancellation()
         if rawSize == nil { return try Data(contentsOf: url, options: .alwaysMapped) }
         let encoded = url.deletingLastPathComponent().appendingPathComponent("image.png")
         if !FileManager.default.fileExists(atPath: encoded.path) {
@@ -112,7 +131,18 @@ actor PinnedImageWorker {
         }
         return try Data(contentsOf: encoded, options: .alwaysMapped)
     }
-    func display(url: URL, rawSize: CGSize?, maximumPixels: Int) throws -> CGImage {
+    func display(url: URL, rawSize: CGSize?, maximumPixels: Int) async throws -> CGImage {
+        let pixels = max(1, min(4096, maximumPixels))
+        let sourceBytes = rawSize.map { Int($0.width) * Int($0.height) * 4 } ?? 0
+        let cost = sourceBytes + pixels * pixels * 4
+        if let result = try ImageWorkBudget.shared.performIfAvailable(estimatedBytes: cost, operation: {
+            try displayAdmitted(url: url, rawSize: rawSize, maximumPixels: maximumPixels)
+        }) { return result }
+        return try await ImageWorkBudget.shared.withPermit(estimatedBytes: cost, priority: .display) {
+            try await self.displayAdmitted(url: url, rawSize: rawSize, maximumPixels: maximumPixels)
+        }
+    }
+    private func displayAdmitted(url: URL, rawSize: CGSize?, maximumPixels: Int) throws -> CGImage {
         try autoreleasepool {
             try Task.checkCancellation()
             guard maximumPixels > 0 else { throw ScreenshotImageError.allocationFailed }

@@ -614,5 +614,18 @@ private func pixel(_ image: CGImage, _ x: Int, _ y: Int) -> [UInt8] {
         #expect(!model.applyShortcut(settings.shortcut, for: .screenshot))
         #expect(!model.applyShortcut(settings.screenshotShortcut, for: .history))
         #expect(settings.screenshotShortcut.label == "⌃⌥S" && settings.shortcut.label == "⇧⌘V")
+        settings.screenRecordingEnabled = false
+        let previous = settings.shortcut(for: .recordFullScreen)
+        #expect(!model.applyShortcut(settings.shortcut, for: .recordFullScreen))
+        #expect(!model.applyShortcut(settings.shortcut(for: .recordRegion), for: .recordFullScreen))
+        #expect(settings.shortcut(for: .recordFullScreen) == previous)
+        var actions: [HotKeyAction] = []
+        keys.onScreenRecording = { actions.append($0) }
+        for action in HotKeyAction.recordingActions { keys.invoke(action) }
+        #expect(actions == HotKeyAction.recordingActions)
+        keys.record { _ in }
+        keys.invoke(.recordStop)
+        #expect(actions == HotKeyAction.recordingActions)
+        keys.cancelRecording()
     }
 }

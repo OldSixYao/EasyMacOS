@@ -1,1 +1,2 @@
 "NSPasteboardUsageDescription" = "EasyMacOS saves copied text and images locally so you can find and paste them again.";
+"NSMicrophoneUsageDescription" = "EasyMacOS records microphone audio only when you enable it for screen recording.";

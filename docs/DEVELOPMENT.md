@@ -1,6 +1,43 @@
 # EasyMacOS 开发与使用说明
 
+## 屏幕录制
+
+在菜单栏选择“全屏录制”或“区域录制”，也可分别按 `⌃⌥R`、`⌃⌥⇧R`。全屏模式点击一块显示器后，点击选区旁的“开始录制”或按回车开始倒计时；区域模式拖动框选，拖动内部移动、拖动边缘调整，回车或“开始录制”确认。开始、重新选择与取消操作栏跟随选区，优先显示在选区下方，空间不足时移到上方；拖动选区内部可移动，拖动八个边角控制点可缩放，拖动期间隐藏操作栏。鼠标在选区内部显示移动手形，边缘与四角显示对应缩放光标，移出选区恢复箭头；未框选时显示十字光标。按钮悬停显示手形指针、高亮与操作提示。“重新选择”允许换到另一块显示器。选择与倒计时阶段可按退出键取消。
+
+区域框选的左上方显示“宽 × 高 像素”，采用与截图相同的等宽白字及半透明黑色底。尺寸按当前显示器的缩放比例换算，框选和调整时实时更新，靠近屏幕边缘时提示保持可见并避开操作栏；该尺寸表示原始选区的像素范围，保存视频的分辨率仍受所选画质限制。
+
+悬浮条采用宽二百四十四点、高四十四点的单行布局，暂停／继续及停止按钮通过图标与悬停提示操作，可拖动到其他位置。区域模式初始优先位于选区外；全屏和区域模式在倒计时、录制和暂停期间持续显示透明中心的细高亮边框：录制为红色、暂停为橙色，鼠标操作可直接穿透；取消或进入保存时移除，边框不进入成片。
+
+悬浮条和菜单栏均支持暂停、继续和停止；默认快捷键为 `⌃⌥P` 和 `⌃⌥S`。暂停会完成当前片段，继续后创建新片段，停止后顺序合并并去掉暂停间隔。保存期间等待完成后再开始下一次录制。录屏不会写入剪贴板历史，录屏和截图不可同时启动。
+
+在“录屏”设置中配置画质、声音、保存目录和快捷键。默认不录声音，启用麦克风需要额外授权，使用系统默认输入设备。标准画质保持每秒三十帧，长边最多三千八百四十像素、短边最多两千一百六十像素；可选轻量画质为每秒十五帧，长边最多一千九百二十像素、短边最多一千零八十像素。两档均按屏幕原始像素等比输出，不放大，采用标准动态范围及 `H.264`，包含鼠标指针，自动保存为 `.mp4`。录制开始后使用本次设置快照，更改只影响下一次。保存完成后，点击“打开视频”或“在访达中显示”执行对应动作并关闭完成窗口。
+
+单片段且无需混音时直接复制有效的视频文件；多片段的编码参数一致且只有一条声音轨道时优先直接拼接压缩数据。需要双音源混音、编码参数不兼容或直接拼接失败时继续重新编码。交付完成前保留原始片段，取消和失败不会破坏恢复来源。
+
+默认保存到 `~/Movies/EasyMacOS/`。当前会话片段位于目标目录中以 `.easymacos-recording-` 开头的专属隐藏目录，完成后发布最终视频并清理对应片段；失败时保留原片段，错误界面提供重试与定位。关闭错误界面保留恢复记录，菜单栏可重新进入恢复，重启后也会显示待恢复会话。不要在恢复成功前手动删除片段目录。
+
+锁屏、休眠、显示配置变化和模块关闭会结束当前录制并保存；退出应用会等待保存。保存失败时取消退出，需先重试保存，或选择“保留并关闭”后再退出。
+
+常规测试使用替身采集服务与合成音画，不请求系统权限。实机检查须由已获屏幕录制权限的调用进程运行，生成的视频仅保留在本机：
+
+```sh
+./scripts/test.sh --filter ScreenRecordingTests
+./scripts/test.sh --filter ScreenRecordingExportTests
+# 在独立终端展示可重复录制的合成画面，结束后关闭该进程。
+swift scripts/recording-scene.swift
+# 全屏实机测量时使用合成画面覆盖显示器，避免录入用户窗口。
+EASYMACOS_RECORDING_SCENE_FULLSCREEN=1 swift scripts/recording-scene.swift
+# 另一个终端进行真实全屏与区域采集、暂停、拼接和解码检查。
+EASYMACOS_LIVE_RECORDING=1 EASYMACOS_RECORDING_OUTPUT=/tmp/easymacos-recording-live \
+  ./scripts/test.sh --filter ScreenRecordingLiveTests
+# 已运行并授权的签名应用：检查真实框选、控制条排除、暂停、保存及退出收尾。
+# 使用应用当前配置目录保存验证视频，检查结束后应用正常退出。
+swift scripts/recording-smoke.swift
+```
+
 ## 后台采集与资源验证
+
+历史面板隐藏后只保留前一百条记录及对应缩略图，十五秒内重开会取消回收；超时、内存压力或关闭剪贴板模块时释放隐藏列表、来源和缩略图。全局点击监听随面板显示启停，数据库仅在首次实际访问时打开。图片临时缓冲由跨模块预算控制，原图、显示缓存和系统窗口缓冲各有不同所有者，预算不代表整个进程的硬上限。
 
 剪贴板完整内容在专用串行队列读取，同一监控器最多有一次未完成读取。系统读取本身无法强行中断，应用在返回时复核变更计数、来源状态、暂停与权限，丢弃过期结果；读入后的处理队列继续限制为八条等待记录和三十二兆字节。队列容量不等同于单次系统读取或解码的瞬时内存上限。
 
@@ -128,7 +165,7 @@ Window snapping, scrolling screenshots, cross-display selections, OCR, recording
 EASYMACOS_MOUSE_UI=1 ./scripts/test.sh --filter MouseScrollParameterViewTests
 # 可选真实接管验证，仅向临时合成窗口发事件；需已有权限并先退出其他滚动增强工具
 EASYMACOS_MOUSE_LIVE=1 ./scripts/test.sh --filter MouseScrollDeliveryTests
-# 界面离屏渲染，包含六个标签及鼠标页的深浅外观
+# 界面离屏渲染，包含七个标签及鼠标页的深浅外观
 PASTEMAN_RENDER_TESTS=1 ./scripts/test.sh --filter RenderingTests
 # 对已打开的设置窗口检查六标签与语言切换，结束后恢复原标签和语言
 swift scripts/settings-smoke.swift
@@ -432,6 +469,12 @@ EASYMACOS_MIXED_LARGE=1 EASYMACOS_MIXED_BENCHMARK_OUTPUT=/tmp/easymacos-mixed-la
 EASYMACOS_INPUT_BENCHMARK_OUTPUT=/tmp/easymacos-input ./scripts/test.sh -c release --filter OptimizationBenchmarks/measureInputCosts
 # 单独测量一百二十赫兹模拟时钟下的权限结果复用，不投递鼠标事件
 EASYMACOS_MOUSE_PERMISSION_BENCHMARK_OUTPUT=/tmp/easymacos-mouse-permission ./scripts/test.sh -c release --filter OptimizationBenchmarks/measureMousePermissionCache
+# 合成视频比较单片段交付、多片段无损拼接与原最高质量导出。
+EASYMACOS_RECORDING_EXPORT_OUTPUT=/tmp/easymacos-recording-export ./scripts/test.sh -c release --filter ScreenRecordingExportTests/measureExportFastPaths
+# 已有屏幕录制授权，并在另一终端展示全屏合成画面时，比较录屏缓冲方案。
+EASYMACOS_RECORDING_BUFFER_OUTPUT=/tmp/easymacos-recording-buffers ./scripts/test.sh -c release --filter RecordingBufferBenchmarks
+# 指定单一方案与时长，便于独立进程复测；最长六十秒。
+EASYMACOS_RECORDING_BUFFER_OUTPUT=/tmp/easymacos-recording-long EASYMACOS_RECORDING_BENCHMARK_VARIANT=nv12-6-standard EASYMACOS_RECORDING_BENCHMARK_SECONDS=30 ./scripts/test.sh -c release --filter RecordingBufferBenchmarks
 ```
 
 比较重要改动时，优化前后分别至少运行两次，把两次目录同时传入 `--before` 或 `--after`。离屏布局不等于可见首帧，局部绘制耗时不等于显示器帧率；测试进程物理占用与发布应用绝对占用不能混用。钉图合成场景固定窗口内容尺寸并等待显示位图准备完成，不将未解码占位状态计为完成。
@@ -441,6 +484,10 @@ EASYMACOS_MOUSE_PERMISSION_BENCHMARK_OUTPUT=/tmp/easymacos-mouse-permission ./sc
 混合图片负载每次使用独立测试进程，按约一毫秒间隔采样物理占用；开始前已经生成原图、压缩数据和钉图后备。应重复多次独立运行，采样峰值不能当作连续绝对峰值。各图片模块保留独立的串行工作器，钉图的显示预算不包含原图输入、处理临时缓冲、窗口合成器和系统缓存，不能当作进程物理内存上限。输入路径微测量不能代表外部应用延迟提供剪贴板内容时的等待，也不能推断真实耗电。
 
 应用通过系统性能标记记录 `HistoryFirstPage`、`HistoryQuery`、`HistorySave`、`ScreenshotExport`、`SystemScreenCapture`、`ClipboardRead` 和 `ClipboardProcessing` 阶段。可在完整开发工具的性能分析器中按应用子系统筛选；仅安装命令行工具的机器可先使用进程采样脚本观察主线程栈。标记不包含文本、图片、路径和来源名称。真实多屏截图延迟、可见交互帧率和硬件耗电需要在对应设备上单独测量，不能从合成数据推断。
+
+跨模块图片调度正常时允许三百八十四兆字节的估算临时缓冲，内存压力警告和严重时分别降至一半和四分之一；额外保留八兆字节的小图通道。单个任务超过预算时独占执行，避免永久拒绝已支持的原图。等待任务可取消，已进入同步系统调用的工作结束后才归还预算。该估算不包含已持有原图、系统图像缓存、窗口合成和媒体编码进程，不能用作整个应用的物理占用上限。
+
+单帧、无需方向变换的 `.png` 图片保留原压缩像素、透明度与解色块，剔除文字、拍摄信息、位置和未知附属块；旋转、多帧及其他格式继续像素重编码。原始像素不变，同一压缩图片去除不同来源元数据后的内容保持一致；不同编码器产生的不同压缩流不会强制归一。录屏缓冲测量同时检查文件时长、持续输出帧数和分辨率，进程物理占用不包括系统合成器或硬件编码服务的全部缓冲。
 
 
 ## 办公模板与类型图标维护

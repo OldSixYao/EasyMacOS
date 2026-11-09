@@ -1,1 +1,2 @@
 "NSPasteboardUsageDescription" = "EasyMacOS 将复制的文本和图片保存在本机，方便查找和再次粘贴。";
+"NSMicrophoneUsageDescription" = "EasyMacOS 仅在你启用录屏麦克风选项时录制麦克风声音。";

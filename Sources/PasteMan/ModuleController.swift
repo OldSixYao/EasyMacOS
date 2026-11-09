@@ -7,6 +7,7 @@ import Foundation
     private let monitor: ClipboardMonitor
     private let screenshots: ScreenshotCoordinator
     private var started = false
+    var onScreenRecordingDisabled: (() -> Void)?
     var onClipboardDisabled: (() -> Void)?
     var onStatusChanged: (() -> Void)?
     var onShortcutIssue: ((HotKeyAction, String?) -> Void)?
@@ -23,9 +24,11 @@ import Foundation
         started = true
         settings.onClipboardChanged = { [weak self] in self?.applyClipboard() }
         settings.onScreenshotChanged = { [weak self] in self?.applyScreenshot() }
+        settings.onScreenRecordingChanged = { [weak self] in self?.applyScreenRecording() }
         settings.onRetentionChanged = { [weak self] in self?.monitor.scheduleCleanup() }
         applyClipboard()
         applyScreenshot()
+        applyScreenRecording()
     }
 
     private func applyClipboard() {
@@ -54,6 +57,15 @@ import Foundation
         }
     }
 
+    private func applyScreenRecording() {
+        hotKeys.cancelRecording()
+        for action in HotKeyAction.recordingActions {
+            if settings.screenRecordingEnabled { register(settings.shortcut(for: action), for: action) }
+            else { hotKeys.unregister(for: action); onShortcutIssue?(action, nil) }
+        }
+        if !settings.screenRecordingEnabled { onScreenRecordingDisabled?() }
+    }
+
     private func register(_ shortcut: Shortcut, for action: HotKeyAction) {
         let issue = hotKeys.register(shortcut, for: action) ? nil : L.t(
             "Shortcut unavailable. Choose another in Settings.", "快捷键已被占用，请在设置中修改。")
@@ -65,9 +77,11 @@ import Foundation
         settings.onClipboardChanged = nil
         settings.onScreenshotChanged = nil
         settings.onRetentionChanged = nil
+        settings.onScreenRecordingChanged = nil
         monitor.stop()
         screenshots.isEnabled = false
         hotKeys.unregister(for: .history)
         hotKeys.unregister(for: .screenshot)
+        for action in HotKeyAction.recordingActions { hotKeys.unregister(for: action) }
     }
 }

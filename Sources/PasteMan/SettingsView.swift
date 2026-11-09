@@ -5,12 +5,13 @@ import ServiceManagement
 import SwiftUI
 
 enum SettingsTab: Int, CaseIterable {
-    case general, screenshot, clipboard, finder, mouse, permissions
+    case general, screenshot, clipboard, finder, mouse, permissions, screenRecording
 
     var title: String {
         switch self {
         case .general: L.t("General", "通用")
         case .screenshot: L.t("Screenshots", "截图")
+        case .screenRecording: L.t("Recording", "录屏")
         case .clipboard: L.t("Clipboard", "剪贴板")
         case .finder: L.t("Context Menu", "右键菜单")
         case .mouse: L.t("Mouse", "鼠标")
@@ -22,6 +23,7 @@ enum SettingsTab: Int, CaseIterable {
         switch self {
         case .general: "gearshape"
         case .screenshot: "viewfinder"
+        case .screenRecording: "record.circle"
         case .clipboard: "doc.on.clipboard"
         case .finder: "cursorarrow.click.2"
         case .mouse: "computermouse"
@@ -34,6 +36,7 @@ struct SettingsView: View {
     @Bindable var model: AppModel
     @ViewState private var recording: HotKeyAction?
     @ViewState private var shortcutError: String?
+    @ViewState private var shortcutErrorAction: HotKeyAction?
     @ViewState private var newBundleID = ""
     @ViewState private var error: String?
     @ViewState private var selectedTab: SettingsTab
@@ -55,6 +58,7 @@ struct SettingsView: View {
                         VStack(spacing: 6) {
                             Image(systemName: tab.symbol).font(.system(size: 20)).frame(height: 24)
                             Text(tab.title).font(.system(size: 12, weight: .medium))
+                                .lineLimit(1).minimumScaleFactor(0.8)
                         }
                         .frame(maxWidth: .infinity)
                         .frame(height: 60)
@@ -89,6 +93,7 @@ struct SettingsView: View {
                 switch selectedTab {
                 case .general: generalSettings
                 case .screenshot: screenshotSettings
+                case .screenRecording: screenRecordingSettings
                 case .clipboard: clipboardSettings
                 case .finder: FinderSettingsView(model: model.finderModel)
                 case .mouse: MouseSettingsView(settings: model.settings, service: model.mouseScroll, permissions: model.permissions)
@@ -100,6 +105,7 @@ struct SettingsView: View {
         .frame(width: 600, height: 580)
         .background(Color(nsColor: .windowBackgroundColor))
         .onChange(of: model.settings.screenshotEnabled) { cancelRecording(); shortcutError = nil }
+        .onChange(of: model.settings.screenRecordingEnabled) { cancelRecording(); shortcutError = nil }
         .onChange(of: model.settings.clipboardEnabled) { cancelRecording(); shortcutError = nil }
         .onChange(of: focusedTab) { previous, current in
             guard let current else { return }
@@ -183,6 +189,56 @@ struct SettingsView: View {
         }.formStyle(.grouped)
     }
 
+    private var screenRecordingSettings: some View {
+        @Bindable var settings = model.settings
+        return Form {
+            Section { Toggle(L.t("Enable screen recording", "启用录屏"), isOn: $settings.screenRecordingEnabled) }
+            Group {
+                Section {
+                    Picker(L.t("Quality", "画质"), selection: $settings.screenRecordingOptions.quality) {
+                        ForEach(ScreenRecordingQuality.allCases, id: \.self) { quality in
+                            Text(quality.title).tag(quality)
+                        }
+                    }.accessibilityIdentifier("recording.quality")
+                    Toggle(L.t("Record system audio", "录制系统声音"), isOn: $settings.screenRecordingOptions.systemAudio)
+                    Toggle(L.t("Record microphone", "录制麦克风"), isOn: $settings.screenRecordingOptions.microphone)
+                    Text(settings.screenRecordingOptions.quality.detail + L.t(" · MP4 · Pointer included", " · 包含鼠标指针"))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Section {
+                    Text(settings.screenRecordingOptions.directory.path).font(.caption).textSelection(.enabled)
+                    HStack {
+                        Button(L.t("Choose folder…", "选择目录…")) {
+                            let panel = NSOpenPanel()
+                            panel.canChooseDirectories = true
+                            panel.canChooseFiles = false
+                            panel.canCreateDirectories = true
+                            panel.allowsMultipleSelection = false
+                            panel.directoryURL = settings.screenRecordingOptions.directory
+                            if panel.runModal() == .OK, let url = panel.url { settings.screenRecordingOptions.directory = url }
+                        }
+                        Button(L.t("Open folder", "打开目录")) {
+                            do {
+                                let url = settings.screenRecordingOptions.directory
+                                try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+                                if !NSWorkspace.shared.open(url) { throw ScreenRecordingError.outputDirectory }
+                            } catch { self.error = error.localizedDescription }
+                        }
+                    }
+                } header: { Text(L.t("Save automatically to", "自动保存目录")) }
+                Section {
+                    ForEach(HotKeyAction.recordingActions, id: \.rawValue) { action in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(action.title).font(.caption).foregroundStyle(.secondary)
+                            shortcutRow(for: action)
+                            shortcutFeedback(for: action)
+                        }
+                    }
+                } header: { Text(L.t("Shortcuts", "快捷键")) }
+            }.disabled(!settings.screenRecordingEnabled)
+        }.formStyle(.grouped)
+    }
+
     private var clipboardSettings: some View {
         @Bindable var settings = model.settings
         return Form {
@@ -252,7 +308,7 @@ struct SettingsView: View {
     }
 
     private func shortcutRow(for action: HotKeyAction) -> some View {
-        let shortcut = action == .history ? model.settings.shortcut : model.settings.screenshotShortcut
+        let shortcut = model.settings.shortcut(for: action)
         return HStack {
             Text(L.t("Shortcut", "快捷键"))
             Spacer()
@@ -263,6 +319,7 @@ struct SettingsView: View {
                 model.hotKeys.record { shortcut in
                     recording = nil
                     if let shortcut, !model.applyShortcut(shortcut, for: action) {
+                        shortcutErrorAction = action
                         shortcutError = model.message
                     }
                 }
@@ -272,7 +329,8 @@ struct SettingsView: View {
             Button(L.t("Restore default", "恢复默认")) {
                 cancelRecording()
                 shortcutError = nil
-                if !model.applyShortcut(action == .history ? .default : .screenshot, for: action) {
+                if !model.applyShortcut(action.defaultShortcut, for: action) {
+                    shortcutErrorAction = action
                     shortcutError = model.message
                 }
             }
@@ -280,7 +338,7 @@ struct SettingsView: View {
     }
 
     @ViewBuilder private func shortcutFeedback(for action: HotKeyAction) -> some View {
-        if let issue = shortcutError ?? model.shortcutIssues[action] {
+        if let issue = (shortcutErrorAction == action ? shortcutError : nil) ?? model.shortcutIssues[action] {
             Text(issue).font(.caption).foregroundStyle(.orange)
         }
     }
@@ -303,6 +361,11 @@ struct SettingsView: View {
                     if model.permissions.screenRecording { model.permissions.openPrivacy("Privacy_ScreenCapture") }
                     else { model.permissions.requestScreenRecording() }
                 }
+                permissionRow(
+                    title: L.t("Microphone", "麦克风"),
+                    status: model.permissions.microphone == .authorized ? L.t("Allowed", "已允许") : L.t("Not allowed", "未授权"),
+                    granted: model.permissions.microphone == .authorized
+                ) { Task { await model.permissions.requestMicrophone() } }
                 permissionRow(
                     title: L.t("Accessibility", "辅助功能"),
                     status: accessibilityGranted ? L.t("Allowed", "已允许") : L.t("Not allowed", "未授权"),

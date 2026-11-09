@@ -242,7 +242,15 @@ enum ScreenshotRenderer {
 /// A single worker bounds simultaneous bitmap allocations from previews and exports.
 actor ScreenshotRenderWorker {
     static let shared = ScreenshotRenderWorker()
-    func prepareHistory(_ image: ScreenshotImage) throws -> PreparedContent {
+    func prepareHistory(_ image: ScreenshotImage) async throws -> PreparedContent {
+        if let result = try ImageWorkBudget.shared.performIfAvailable(estimatedBytes: 1_048_576, operation: {
+            try prepareHistoryAdmitted(image)
+        }) { return result }
+        return try await ImageWorkBudget.shared.withPermit(estimatedBytes: 1_048_576, priority: .background) {
+            try await self.prepareHistoryAdmitted(image)
+        }
+    }
+    private func prepareHistoryAdmitted(_ image: ScreenshotImage) throws -> PreparedContent {
         try autoreleasepool { try ImageProcessor.prepareRenderedImage(image.image, png: image.png) }
     }
     private struct PreviewCheckpoint {
@@ -255,7 +263,16 @@ actor ScreenshotRenderWorker {
     func releasePreview(session: UUID) {
         if checkpoint?.session == session { checkpoint = nil }
     }
-    func preview(base: CGImage, pointSize: CGSize, annotations: [ScreenshotAnnotation], session: UUID? = nil) throws -> CGImage {
+    func preview(base: CGImage, pointSize: CGSize, annotations: [ScreenshotAnnotation], session: UUID? = nil) async throws -> CGImage {
+        let dimension = min(1800, max(base.width, base.height))
+        if let result = try ImageWorkBudget.shared.performIfAvailable(estimatedBytes: dimension * dimension * 8, operation: {
+            try previewAdmitted(base: base, pointSize: pointSize, annotations: annotations, session: session)
+        }) { return result }
+        return try await ImageWorkBudget.shared.withPermit(estimatedBytes: dimension * dimension * 8, priority: .display) {
+            try await self.previewAdmitted(base: base, pointSize: pointSize, annotations: annotations, session: session)
+        }
+    }
+    private func previewAdmitted(base: CGImage, pointSize: CGSize, annotations: [ScreenshotAnnotation], session: UUID?) throws -> CGImage {
         try Task.checkCancellation()
         let image = try autoreleasepool {
             if let session, let previous = checkpoint, previous.session == session, previous.size == pointSize,
@@ -270,7 +287,16 @@ actor ScreenshotRenderWorker {
         if let session { checkpoint = PreviewCheckpoint(session: session, size: pointSize, annotations: annotations, image: image) }
         return image
     }
-    func export(base: CGImage, pointSize: CGSize, annotations: [ScreenshotAnnotation]) throws -> ScreenshotImage {
+    func export(base: CGImage, pointSize: CGSize, annotations: [ScreenshotAnnotation]) async throws -> ScreenshotImage {
+        let cost = base.bytesPerRow * base.height * (annotations.isEmpty ? 1 : 2)
+        if let result = try ImageWorkBudget.shared.performIfAvailable(estimatedBytes: cost, operation: {
+            try exportAdmitted(base: base, pointSize: pointSize, annotations: annotations)
+        }) { return result }
+        return try await ImageWorkBudget.shared.withPermit(estimatedBytes: cost, priority: .userInitiated) {
+            try await self.exportAdmitted(base: base, pointSize: pointSize, annotations: annotations)
+        }
+    }
+    private func exportAdmitted(base: CGImage, pointSize: CGSize, annotations: [ScreenshotAnnotation]) throws -> ScreenshotImage {
         let interval = PerformanceTrace.signposter.beginInterval("ScreenshotExport", id: PerformanceTrace.signposter.makeSignpostID())
         defer { PerformanceTrace.signposter.endInterval("ScreenshotExport", interval) }
         try Task.checkCancellation()

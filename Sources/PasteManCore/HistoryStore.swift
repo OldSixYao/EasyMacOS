@@ -25,9 +25,12 @@ public actor HistoryStore: HistoryRepository {
               favorite INTEGER NOT NULL DEFAULT 0, bytes INTEGER NOT NULL
             )
             """)
-        try db.execute("CREATE INDEX IF NOT EXISTS history_recency ON history(favorite DESC, copied_at DESC)")
+        // 全部字段反向扫描时，隐含的 rowid 也按降序读取，避免相同时间戳额外排序。
+        try db.execute("CREATE INDEX IF NOT EXISTS history_recency_cursor ON history(favorite, copied_at)")
+        try db.execute("DROP INDEX IF EXISTS history_recency")
         try db.execute("CREATE INDEX IF NOT EXISTS history_source ON history(source_id)")
-        try db.execute("CREATE INDEX IF NOT EXISTS history_ordinary ON history(copied_at DESC) WHERE favorite = 0")
+        try db.execute("CREATE INDEX IF NOT EXISTS history_ordinary_cursor ON history(copied_at) WHERE favorite = 0")
+        try db.execute("DROP INDEX IF EXISTS history_ordinary")
         let database = db
         try database.transaction {
             try database.execute("CREATE TABLE IF NOT EXISTS history_totals (id INTEGER PRIMARY KEY CHECK(id=1), bytes INTEGER NOT NULL, pinned INTEGER NOT NULL, ordinary INTEGER NOT NULL)")
@@ -40,7 +43,9 @@ public actor HistoryStore: HistoryRepository {
                 }
             }
             // 聚合由触发器与数据修改在同一事务中维护，旧库只在首次打开时计算一次。
-            try database.execute("INSERT OR IGNORE INTO history_totals SELECT 1, coalesce(sum(bytes),0), coalesce(sum(CASE WHEN favorite=1 THEN bytes ELSE 0 END),0), coalesce(sum(1-favorite),0) FROM history")
+            if try database.rows("SELECT id FROM history_totals WHERE id=1", map: { _ in true }).isEmpty {
+                try database.execute("INSERT INTO history_totals SELECT 1, coalesce(sum(bytes),0), coalesce(sum(CASE WHEN favorite=1 THEN bytes ELSE 0 END),0), coalesce(sum(1-favorite),0) FROM history")
+            }
             try database.execute("CREATE TRIGGER IF NOT EXISTS history_insert_total AFTER INSERT ON history BEGIN UPDATE history_totals SET bytes=bytes+NEW.bytes, pinned=pinned+NEW.favorite*NEW.bytes, ordinary=ordinary+1-NEW.favorite WHERE id=1; END")
             try database.execute("CREATE TRIGGER IF NOT EXISTS history_delete_total AFTER DELETE ON history BEGIN UPDATE history_totals SET bytes=bytes-OLD.bytes, pinned=pinned-OLD.favorite*OLD.bytes, ordinary=ordinary-1+OLD.favorite WHERE id=1; END")
             try database.execute("CREATE TRIGGER IF NOT EXISTS history_update_total AFTER UPDATE OF bytes,favorite ON history BEGIN UPDATE history_totals SET bytes=bytes+NEW.bytes-OLD.bytes, pinned=pinned+NEW.favorite*NEW.bytes-OLD.favorite*OLD.bytes, ordinary=ordinary+OLD.favorite-NEW.favorite WHERE id=1; END")

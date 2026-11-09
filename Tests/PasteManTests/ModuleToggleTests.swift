@@ -59,6 +59,10 @@ private actor ModulePreparation {
         let modifiers = UInt32(controlKey | optionKey | shiftKey | cmdKey)
         settings.shortcut = Shortcut(keyCode: UInt32(kVK_F13), modifiers: modifiers, keyLabel: "F13")
         settings.screenshotShortcut = Shortcut(keyCode: UInt32(kVK_F14), modifiers: modifiers, keyLabel: "F14")
+        for (index, action) in HotKeyAction.recordingActions.enumerated() {
+            settings.setShortcut(Shortcut(keyCode: UInt32([kVK_F15, kVK_F16, kVK_F17, kVK_F18][index]),
+                                          modifiers: modifiers, keyLabel: "F\(index + 15)"), for: action)
+        }
         self.settings = settings
         let store = try HistoryStore(directory: directory)
         self.store = store
@@ -159,6 +163,25 @@ private actor ModulePreparation {
         f.settings.screenshotEnabled = false
         #expect(competitor.register(f.settings.screenshotShortcut, for: .screenshot))
         #expect(f.monitor.isPolling && !f.screenshots.isEnabled)
+    }
+
+    @Test func disablingScreenRecordingReleasesItsKeysWithoutStoppingOtherModules() throws {
+        let f = try ModuleFixture()
+        defer { f.clean() }
+        let competitor = HotKeyService()
+        defer { competitor.stop() }
+        var disabled = 0
+        f.modules.onScreenRecordingDisabled = { disabled += 1 }
+        f.modules.start()
+        for action in HotKeyAction.recordingActions { #expect(!competitor.register(f.settings.shortcut(for: action), for: action)) }
+        f.settings.screenRecordingEnabled = false
+        #expect(disabled == 1 && f.monitor.isPolling && f.screenshots.isEnabled)
+        for action in HotKeyAction.recordingActions { #expect(competitor.register(f.settings.shortcut(for: action), for: action)) }
+        f.settings.screenRecordingEnabled = true
+        for action in HotKeyAction.recordingActions { #expect(f.model.shortcutIssues[action] != nil); competitor.unregister(for: action) }
+        f.settings.screenRecordingEnabled = false
+        f.settings.screenRecordingEnabled = true
+        #expect(f.model.shortcutIssues.isEmpty && f.monitor.isPolling && f.screenshots.isEnabled)
     }
 
     @Test func disablingCancelsQueriesAndKeepsFavoritesAndPauseAcrossResume() async throws {

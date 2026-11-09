@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 @preconcurrency import ApplicationServices
 import Carbon
 import Observation
@@ -50,12 +51,14 @@ enum ClipboardSnapshot: Sendable {
     private(set) var accessibility = CGPreflightPostEventAccess()
     private(set) var clipboard: ClipboardAccess = .needsApproval
     private(set) var screenRecording = CGPreflightScreenCaptureAccess()
+    private(set) var microphone = AVCaptureDevice.authorizationStatus(for: .audio)
     private(set) var loginStatus = SMAppService.mainApp.status
     var allowsMonitoring: Bool { clipboard == .allowed }
 
     func refresh() {
         accessibility = CGPreflightPostEventAccess()
         screenRecording = CGPreflightScreenCaptureAccess()
+        microphone = AVCaptureDevice.authorizationStatus(for: .audio)
         refreshClipboard()
         loginStatus = SMAppService.mainApp.status
     }
@@ -80,6 +83,12 @@ enum ClipboardSnapshot: Sendable {
         screenRecording = CGRequestScreenCaptureAccess()
         if !screenRecording { openPrivacy("Privacy_ScreenCapture") }
     }
+    func requestMicrophone() async {
+        if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
+            _ = await AVCaptureDevice.requestAccess(for: .audio)
+        } else { openPrivacy("Privacy_Microphone") }
+        refresh()
+    }
     func requestAccessibility() {
         FinderRenameAccess.request()
         accessibility = CGPreflightPostEventAccess()
@@ -102,11 +111,38 @@ enum ClipboardSnapshot: Sendable {
 enum HotKeyAction: UInt32, CaseIterable {
     case history = 1
     case screenshot = 2
+    case recordFullScreen = 3
+    case recordRegion = 4
+    case recordPause = 5
+    case recordStop = 6
+
+    static let recordingActions: [Self] = [.recordFullScreen, .recordRegion, .recordPause, .recordStop]
+    var defaultShortcut: Shortcut {
+        switch self {
+        case .history: .default
+        case .screenshot: .screenshot
+        case .recordFullScreen: Shortcut(keyCode: UInt32(kVK_ANSI_R), modifiers: UInt32(controlKey | optionKey), keyLabel: "R")
+        case .recordRegion: Shortcut(keyCode: UInt32(kVK_ANSI_R), modifiers: UInt32(controlKey | optionKey | shiftKey), keyLabel: "R")
+        case .recordPause: Shortcut(keyCode: UInt32(kVK_ANSI_P), modifiers: UInt32(controlKey | optionKey), keyLabel: "P")
+        case .recordStop: Shortcut(keyCode: UInt32(kVK_ANSI_S), modifiers: UInt32(controlKey | optionKey), keyLabel: "S")
+        }
+    }
+    var title: String {
+        switch self {
+        case .history: L.t("History panel", "历史面板")
+        case .screenshot: L.t("Screenshot", "截图")
+        case .recordFullScreen: L.t("Record full screen", "全屏录制")
+        case .recordRegion: L.t("Record a region", "区域录制")
+        case .recordPause: L.t("Pause / resume", "暂停／继续")
+        case .recordStop: L.t("Stop recording", "停止录制")
+        }
+    }
 }
 
 @MainActor final class HotKeyService {
     var onInvoke: (() -> Void)?
     var onScreenshot: (() -> Void)?
+    var onScreenRecording: ((HotKeyAction) -> Void)?
     private var hotKeys: [HotKeyAction: EventHotKeyRef] = [:]
     private var handler: EventHandlerRef?
     private var recorder: Any?
@@ -143,6 +179,7 @@ enum HotKeyAction: UInt32, CaseIterable {
         switch action {
         case .history: onInvoke?()
         case .screenshot: onScreenshot?()
+        case .recordFullScreen, .recordRegion, .recordPause, .recordStop: onScreenRecording?(action)
         }
     }
     func register(_ shortcut: Shortcut, for action: HotKeyAction = .history) -> Bool {

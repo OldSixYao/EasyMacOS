@@ -98,8 +98,9 @@ import Testing
         }
         settings.screenshotEnabled = false
         settings.clipboardEnabled = false
+        settings.screenRecordingEnabled = false
         model.finderModel.setEnabled(false)
-        for tab in [SettingsTab.screenshot, .clipboard, .finder] {
+        for tab in [SettingsTab.screenshot, .clipboard, .finder, .screenRecording] {
             for appearance in [NSAppearance.Name.aqua, .darkAqua] {
                 let mode = appearance == .aqua ? "light" : "dark"
                 try await snapshot(
@@ -109,6 +110,7 @@ import Testing
         }
         settings.screenshotEnabled = true
         settings.clipboardEnabled = true
+        settings.screenRecordingEnabled = true
         model.finderModel.setEnabled(true)
         settings.mouse.remoteCompatibility = true
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {

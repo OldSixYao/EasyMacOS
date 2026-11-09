@@ -17,7 +17,16 @@ public actor DisplayImageDecoder {
         self.decodeImage = decodeImage
     }
 
-    public func decode(_ data: Data, maximumPixelSize: Int) throws -> CGImage {
+    public func decode(_ data: Data, maximumPixelSize: Int) async throws -> CGImage {
+        let pixels = max(1, min(8192, maximumPixelSize))
+        if let result = try ImageWorkBudget.shared.performIfAvailable(estimatedBytes: pixels * pixels * 4, operation: {
+            try decodeAdmitted(data, maximumPixelSize: maximumPixelSize)
+        }) { return result }
+        return try await ImageWorkBudget.shared.withPermit(estimatedBytes: pixels * pixels * 4, priority: .display) {
+            try await self.decodeAdmitted(data, maximumPixelSize: maximumPixelSize)
+        }
+    }
+    private func decodeAdmitted(_ data: Data, maximumPixelSize: Int) throws -> CGImage {
         try Task.checkCancellation()
         return try autoreleasepool {
             let image = try decodeImage(data, maximumPixelSize)

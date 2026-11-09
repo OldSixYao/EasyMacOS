@@ -4,6 +4,48 @@ import Testing
 @testable import PasteManCore
 
 @Suite("存储优化回归") struct StorageOptimizationTests {
+    @Test func unusedRepositoryDoesNotCreateStorageAndConcurrentFirstAccessSharesOpen() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let repository = try RecoveringHistoryRepository(directory: directory)
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(!FileManager.default.fileExists(atPath: directory.path))
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for index in 0..<8 {
+                group.addTask {
+                    try await repository.save(.text("并发首次保存 \(index)"), sourceBundleID: "test", sourceName: "合成应用",
+                        policy: RetentionPolicy(), now: Date())
+                }
+            }
+            try await group.waitForAll()
+        }
+        #expect(try await repository.list(search: "", filter: .all, source: nil).count == 8)
+    }
+
+    @Test func reopeningMigratesSortIndexesWithoutTemporaryTieSortAndPreservesTotals() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try HistoryStore(directory: directory)
+        try await store.save(.text("迁移后仍然存在"), sourceBundleID: "test", sourceName: "合成应用", policy: RetentionPolicy())
+        let db = try Database(path: directory.appendingPathComponent("history.sqlite").path)
+        try db.execute("DROP INDEX history_recency_cursor")
+        try db.execute("DROP INDEX history_ordinary_cursor")
+        try db.execute("CREATE INDEX history_recency ON history(favorite DESC, copied_at DESC)")
+        try db.execute("CREATE INDEX history_ordinary ON history(copied_at DESC) WHERE favorite=0")
+        let reopened = try HistoryStore(directory: directory)
+        #expect(try await reopened.page().entries.count == 1)
+        let migratedDB = try Database(path: directory.appendingPathComponent("history.sqlite").path)
+        let plan = try migratedDB.rows("EXPLAIN QUERY PLAN SELECT id FROM history ORDER BY favorite DESC, copied_at DESC, rowid DESC LIMIT 101") {
+            Database.text($0, 3)
+        }
+        #expect(plan.contains { $0.contains("history_recency_cursor") })
+        #expect(!plan.contains { $0.contains("TEMP B-TREE") })
+        let totals = try migratedDB.rows("SELECT bytes, ordinary FROM history_totals") {
+            (Database.text($0, 0), Database.text($0, 1))
+        }
+        #expect(totals.count == 1 && totals[0].1 == "1")
+    }
+
     @Test func paginationPreservesTiesFavoritesFiltersAndDeletedCursor() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

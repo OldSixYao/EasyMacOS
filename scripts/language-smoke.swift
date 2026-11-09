@@ -44,7 +44,7 @@ do {
     let application = AXUIElementCreateApplication(app.processIdentifier)
     let windows = attribute(application, kAXWindowsAttribute) as? [AXUIElement] ?? []
     let labels = [["通用", "General"], ["截图", "Screenshots"], ["剪贴板", "Clipboard"],
-                  ["右键菜单", "Context Menu"], ["鼠标", "Mouse"], ["权限", "Permissions"]]
+                  ["右键菜单", "Context Menu"], ["鼠标", "Mouse"], ["权限", "Permissions"], ["录屏", "Recording"]]
     func tab(_ index: Int, in window: AXUIElement) -> AXUIElement? {
         elements(window).first {
             attribute($0, kAXRoleAttribute) as? String == kAXButtonRole && labels[index].contains(title($0))
@@ -145,7 +145,7 @@ do {
             return text.contains(english ? "Enable mouse enhancement" : "启用鼠标增强")
                 && text.contains(english ? "Remote wheel compatibility" : "远程滚轮兼容")
         }, "鼠标设置未切换语言。")
-        print("通过：\(name) 立即更新窗口、六个标签、鼠标及右键菜单设置和扩展语言配置。")
+        print("通过：\(name) 立即更新窗口、七个标签、鼠标及右键菜单设置和扩展语言配置。")
     }
 } catch {
     fputs("语言检查失败：\(error)\n", stderr)
