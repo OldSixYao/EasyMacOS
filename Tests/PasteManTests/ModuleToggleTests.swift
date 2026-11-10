@@ -59,6 +59,7 @@ private actor ModulePreparation {
         let modifiers = UInt32(controlKey | optionKey | shiftKey | cmdKey)
         settings.shortcut = Shortcut(keyCode: UInt32(kVK_F13), modifiers: modifiers, keyLabel: "F13")
         settings.screenshotShortcut = Shortcut(keyCode: UInt32(kVK_F14), modifiers: modifiers, keyLabel: "F14")
+        settings.longScreenshotShortcut = Shortcut(keyCode: UInt32(kVK_F19), modifiers: modifiers, keyLabel: "F19")
         for (index, action) in HotKeyAction.recordingActions.enumerated() {
             settings.setShortcut(Shortcut(keyCode: UInt32([kVK_F15, kVK_F16, kVK_F17, kVK_F18][index]),
                                           modifiers: modifiers, keyLabel: "F\(index + 15)"), for: action)
@@ -152,6 +153,7 @@ private actor ModulePreparation {
         f.settings.clipboardEnabled = false
         #expect(competitor.register(f.settings.shortcut))
         #expect(!competitor.register(f.settings.screenshotShortcut, for: .screenshot))
+        #expect(!competitor.register(f.settings.longScreenshotShortcut, for: .longScreenshot))
         f.settings.clipboardEnabled = true
         #expect(f.settings.clipboardEnabled && f.model.shortcutIssues[.history] != nil)
         #expect(f.model.shortcutIssues[.screenshot] == nil && f.screenshots.isEnabled)
@@ -161,8 +163,42 @@ private actor ModulePreparation {
         #expect(f.model.shortcutIssues.isEmpty)
         #expect(!competitor.register(f.settings.shortcut))
         f.settings.screenshotEnabled = false
-        #expect(competitor.register(f.settings.screenshotShortcut, for: .screenshot))
+        for action in HotKeyAction.screenshotActions {
+            #expect(competitor.register(f.settings.shortcut(for: action), for: action))
+        }
         #expect(f.monitor.isPolling && !f.screenshots.isEnabled)
+        f.settings.screenshotEnabled = true
+        for action in HotKeyAction.screenshotActions {
+            #expect(f.model.shortcutIssues[action] != nil)
+            competitor.unregister(for: action)
+        }
+        f.settings.screenshotEnabled = false
+        f.settings.screenshotEnabled = true
+        #expect(f.model.shortcutIssues.isEmpty)
+        for action in HotKeyAction.screenshotActions {
+            #expect(!competitor.register(f.settings.shortcut(for: action), for: action))
+        }
+        f.modules.stop()
+        for action in HotKeyAction.screenshotActions {
+            #expect(competitor.register(f.settings.shortcut(for: action), for: action))
+        }
+    }
+
+    @Test func longScreenshotShortcutChangesImmediatelyAndKeepsPreviousCombinationOnConflict() throws {
+        let f = try ModuleFixture()
+        defer { f.clean() }
+        let competitor = HotKeyService()
+        defer { competitor.stop() }
+        f.modules.start()
+        let previous = f.settings.longScreenshotShortcut
+        let replacement = Shortcut(keyCode: UInt32(kVK_F20), modifiers: previous.modifiers, keyLabel: "F20")
+        #expect(f.model.applyShortcut(replacement, for: .longScreenshot))
+        #expect(AppSettings(defaults: f.defaults).longScreenshotShortcut == replacement)
+        #expect(competitor.register(previous, for: .longScreenshot))
+        #expect(!competitor.register(replacement, for: .screenshot))
+        #expect(!f.model.applyShortcut(previous, for: .longScreenshot))
+        #expect(f.settings.longScreenshotShortcut == replacement && f.model.shortcutIssues[.longScreenshot] != nil)
+        #expect(!competitor.register(replacement, for: .screenshot))
     }
 
     @Test func disablingScreenRecordingReleasesItsKeysWithoutStoppingOtherModules() throws {

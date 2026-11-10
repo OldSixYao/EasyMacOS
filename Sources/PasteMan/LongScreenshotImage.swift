@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import PasteManCore
 import Vision
 
@@ -54,6 +55,7 @@ struct LongScreenshotFeatures: Sendable {
     private let signals: [Bool]
     private let detailWidth: Int
     private let detail: [UInt8]
+    private let gradients: [UInt8]
     private let registrationImage: CGImage
     init(_ image: CGImage) throws {
         width = min(96, image.width)
@@ -85,7 +87,18 @@ struct LongScreenshotFeatures: Sendable {
             let buffer = fine.data else { throw ScreenshotImageError.allocationFailed }
         fine.interpolationQuality = .low
         fine.draw(image, in: CGRect(x: 0, y: 0, width: detailWidth, height: height))
-        detail = Array(UnsafeBufferPointer(start: buffer.assumingMemoryBound(to: UInt8.self), count: detailWidth * height))
+        let detail = Array(UnsafeBufferPointer(start: buffer.assumingMemoryBound(to: UInt8.self), count: detailWidth * height))
+        self.detail = detail
+        var gradients = [UInt8](repeating: 0, count: detail.count)
+        // 每张画面的边缘强度只计算一次；所有位移候选复用同一份精确整数结果。
+        for y in 0..<max(0, height - 1) {
+            if y.isMultiple(of: 64) { try Task.checkCancellation() }
+            for x in 0..<max(0, detailWidth - 1) {
+                let index = y * detailWidth + x, value = Int(detail[index])
+                gradients[index] = UInt8(max(abs(value - Int(detail[index + 1])), abs(value - Int(detail[index + detailWidth]))))
+            }
+        }
+        self.gradients = gradients
         guard let registrationImage = fine.makeImage() else { throw ScreenshotImageError.allocationFailed }
         self.registrationImage = registrationImage
         self.signals = signals
@@ -130,7 +143,7 @@ struct LongScreenshotFeatures: Sendable {
             for x in stride(from: max(1, w / 24), to: w * 23 / 24 - 1, by: 2) {
                 let i = y * w + x, value = Int(next.detail[i])
                 guard abs(value - Int(detail[i])) >= 8,
-                    max(abs(value - Int(next.detail[i + 1])), abs(value - Int(next.detail[i + w]))) >= 6 else { continue }
+                    next.gradients[i] >= 6 else { continue }
                 rowChanged += 1
             }
             changed += rowChanged
@@ -141,6 +154,10 @@ struct LongScreenshotFeatures: Sendable {
     }
 
     func match(_ next: Self) throws -> Match {
+        try autoreleasepool { try matchScoped(next) }
+    }
+
+    private func matchScoped(_ next: Self) throws -> Match {
         guard width == next.width, detailWidth == next.detailWidth, height == next.height else { throw LongScreenshotError.overlap }
         // 稳定等待可忽略小动画；零位移判定还须检查细节，避免稀疏文字被空白吞没。
         if isStable(comparedTo: next), !hasChangedDetail(next) { return Match(displacement: 0) }
@@ -254,7 +271,7 @@ struct LongScreenshotFeatures: Sendable {
                 for y in stride(from: y0, to: y0 + patchHeight - 1, by: max(1, patchHeight / 6)) {
                     for x in stride(from: x0, to: min(w - 1, x0 + patchWidth), by: max(1, patchWidth / 8)) {
                         let index = y * w + x, value = Int(next.detail[index])
-                        if max(abs(value - Int(next.detail[index + 1])), abs(value - Int(next.detail[index + w]))) >= 6 {
+                        if next.gradients[index] >= 6 {
                             samples.append((index, value)); change += min(64, abs(Int(detail[index]) - value))
                         }
                     }
@@ -313,8 +330,7 @@ struct LongScreenshotFeatures: Sendable {
                         for x in stride(from: x0, to: x1 - 1, by: 2) {
                             let a = (y + displacement) * w + x, b = y * w + x
                             let av = Int(detail[a]), bv = Int(next.detail[b])
-                            let gradient = max(abs(av - Int(detail[a + 1])), abs(av - Int(detail[a + w])),
-                                abs(bv - Int(next.detail[b + 1])), abs(bv - Int(next.detail[b + w])))
+                            let gradient = max(gradients[a], next.gradients[b])
                             guard gradient >= 6 else { continue }
                             count += 1; rowCount += 1
                             error += min(64, abs(av - bv))
@@ -360,15 +376,21 @@ actor LongScreenshotStitcher: LongScreenshotStitching {
     struct Progress: Sendable { let width: Int; let height: Int; let added: Int; let reachedLimit: Bool }
     private let limits: LongScreenshotLimits
     private let scale: CGFloat
+    private let writeChunk: @Sendable (FileHandle, Data) throws -> Void
     private var directory: URL?
     private var file: FileHandle?
     private var previous: LongScreenshotFeatures?
     private var width = 0
     private var height = 0
     private var frameHeight = 0
+    private var fixedTop: Int?
     private var fixedBottom: Int?
+    private var rollbackPixels = Data()
 
-    init(scale: CGFloat, limits: LongScreenshotLimits = .init()) { self.scale = scale; self.limits = limits }
+    init(scale: CGFloat, limits: LongScreenshotLimits = .init(),
+         writeChunk: @escaping @Sendable (FileHandle, Data) throws -> Void = { try $0.write(contentsOf: $1) }) {
+        self.scale = scale; self.limits = limits; self.writeChunk = writeChunk
+    }
     deinit {
         try? file?.close()
         if let directory { try? FileManager.default.removeItem(at: directory) }
@@ -381,6 +403,11 @@ actor LongScreenshotStitcher: LongScreenshotStitching {
     }
 
     private func appendAdmitted(_ image: CGImage) throws -> Progress {
+        // 跨进程图像处理不依赖主线程自动释放池；每帧及时释放系统配准与转换临时对象。
+        try autoreleasepool { try appendFrame(image) }
+    }
+
+    private func appendFrame(_ image: CGImage) throws -> Progress {
         try Task.checkCancellation()
         let features = try LongScreenshotFeatures(image)
         let match = try previous.map { try $0.match(features) }
@@ -389,27 +416,19 @@ actor LongScreenshotStitcher: LongScreenshotStitching {
                 image.height <= limits.maximumHeight, image.width <= limits.maximumPixels / image.height
             else { throw LongScreenshotError.capacity }
         }
-        guard previous == nil || (image.width == width && image.height == frameHeight),
-            let context = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8,
-                bytesPerRow: image.width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue), let pixels = context.data
+        guard previous == nil || (image.width == width && image.height == frameHeight)
         else { throw ScreenshotImageError.allocationFailed }
-        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
-        let data = Data(bytesNoCopy: pixels, count: image.width * image.height * 4, deallocator: .none)
         if let match, match.displacement == 0 {
-            // 到底后的静止帧可刷新末尾，清除持续滚动期间系统叠加的边缘效果。
+            // 停稳后用当前视口刷新已有内容，清除已退场的悬浮控件与滚动边缘效果。
+            // 顶栏只保留在整图开头，不能在最后一屏重新写入。
             if let file {
-                let rows = min(64, frameHeight)
+                // 已滚动时保留前一帧确认的顶部正文，不把滚动容器的半透明亮边写回长图。
+                let top = min(frameHeight - 1, (fixedTop ?? 0) + (height > frameHeight ? 2 : 0))
+                let rows = frameHeight - top
                 let offset = UInt64((height - rows) * width * 4)
-                try file.seek(toOffset: offset)
-                let backup = try file.read(upToCount: rows * width * 4) ?? Data()
-                do {
+                try withPixelBackup(file: file, offset: offset, count: rows * width * 4) {
                     try file.seek(toOffset: offset)
-                    try file.write(contentsOf: data.suffix(rows * width * 4))
-                } catch {
-                    try? file.seek(toOffset: offset)
-                    try? file.write(contentsOf: backup)
-                    throw error
+                    try writePixels(image, rows: (frameHeight - rows)..<frameHeight, to: file)
                 }
             }
             return Progress(width: width, height: height, added: 0, reachedLimit: false)
@@ -422,43 +441,83 @@ actor LongScreenshotStitcher: LongScreenshotStitching {
             guard FileManager.default.createFile(atPath: url.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
                 throw CocoaError(.fileWriteUnknown)
             }
-            file = try FileHandle(forUpdating: url)
-            try file?.write(contentsOf: data)
+            let handle = try FileHandle(forUpdating: url)
+            file = handle
+            try writePixels(image, rows: 0..<image.height, to: handle)
             width = image.width; height = image.height; frameHeight = image.height
             previous = features
             return Progress(width: width, height: height, added: height,
                 reachedLimit: height >= min(limits.maximumHeight, limits.maximumPixels / width))
         }
         guard let match, let file else { throw ScreenshotImageError.captureUnavailable }
+        let top = fixedTop ?? match.fixedTop
         let bottom = fixedBottom ?? match.fixedBottom
         let added = min(match.displacement, max(0, min(limits.maximumHeight, limits.maximumPixels / width) - height))
         guard added > 0 else { return Progress(width: width, height: height, added: 0, reachedLimit: true) }
-        guard match.displacement < frameHeight - match.fixedTop - bottom else { throw LongScreenshotError.overlap }
+        guard match.displacement < frameHeight - top - bottom else { throw LongScreenshotError.overlap }
         let stride = width * 4
-        // 从上一张的尾部向前覆盖一小段可靠重叠，避免把视口底部的动态阴影烙成接缝。
-        let repair = min(64, max(0, frameHeight - bottom - match.displacement - match.fixedTop))
-        let start = (frameHeight - bottom - match.displacement - repair) * stride
-        let nextFooter = Data(data.suffix(bottom * stride))
+        // 局部悬浮按钮不会随正文滚动。完整刷新已确认位移的重叠区，
+        // 让上一帧的控件由当前帧真实露出的正文覆盖，不能只修复末尾六十四行。
+        // 视口顶部两行可能含原生容器的半透明边缘，沿用此前可靠像素；其余重叠区继续刷新。
+        let repair = max(1, frameHeight - bottom - match.displacement - top - 2)
+        let start = frameHeight - bottom - match.displacement - repair
         let offset = UInt64((height - bottom - repair) * stride)
-        // 先准备新条带，再覆盖上次尾栏；失败时回退到此前可靠的文件长度。
-        let oldFooter: Data
-        try file.seek(toOffset: offset)
-        oldFooter = try file.read(upToCount: (bottom + repair) * stride) ?? Data()
-        do {
+        // 先备份会被覆盖的重叠区和尾栏；失败时恢复像素及此前可靠的文件长度。
+        try withPixelBackup(file: file, offset: offset, count: (bottom + repair) * stride) {
             try file.seek(toOffset: offset)
-            try file.write(contentsOf: data.subdata(in: start..<(start + (added + repair) * stride)))
-            try file.write(contentsOf: nextFooter)
+            try writePixels(image, rows: start..<(start + added + repair), to: file)
+            if bottom > 0 { try writePixels(image, rows: (frameHeight - bottom)..<frameHeight, to: file) }
             try file.truncate(atOffset: UInt64((height + added) * stride))
-        } catch {
-            try? file.seek(toOffset: offset)
-            try? file.write(contentsOf: oldFooter)
-            try? file.truncate(atOffset: UInt64(height * stride))
-            throw error
         }
-        fixedBottom = bottom
+        fixedTop = top; fixedBottom = bottom
         height += added; previous = features
         return Progress(width: width, height: height, added: added, reachedLimit: added < match.displacement
             || height >= min(limits.maximumHeight, limits.maximumPixels / width))
+    }
+
+    private func writePixels(_ image: CGImage, rows: Range<Int>, to file: FileHandle) throws {
+        try Task.checkCancellation()
+        guard !rows.isEmpty, rows.lowerBound >= 0, rows.upperBound <= image.height
+        else { throw ScreenshotImageError.allocationFailed }
+        // 刷新范围最多一个视口，按小条带转换并立即释放，避免恢复整帧位图分配。
+        for start in stride(from: rows.lowerBound, to: rows.upperBound, by: 256) {
+            try autoreleasepool {
+                try Task.checkCancellation()
+                let height = min(256, rows.upperBound - start)
+                guard let strip = image.cropping(to: CGRect(x: 0, y: start, width: image.width, height: height)),
+                    let context = CGContext(data: nil, width: image.width, height: height, bitsPerComponent: 8,
+                        bytesPerRow: image.width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue), let pixels = context.data
+                else { throw ScreenshotImageError.allocationFailed }
+                context.draw(strip, in: CGRect(x: 0, y: 0, width: image.width, height: height))
+                let data = Data(bytesNoCopy: pixels, count: image.width * height * 4, deallocator: .none)
+                try withExtendedLifetime(context) { try writeChunk(file, data) }
+            }
+        }
+    }
+
+    private func withPixelBackup(file: FileHandle, offset: UInt64, count: Int, operation: () throws -> Void) throws {
+        if rollbackPixels.count < count { rollbackPixels = Data(count: max(count, frameHeight * width * 4)) }
+        // 复用同一个视口大小的备份，避免每次重叠刷新创建新的大块文件读取对象。
+        try rollbackPixels.withUnsafeMutableBytes { (buffer: UnsafeMutableRawBufferPointer) in
+            guard let address = buffer.baseAddress else { throw ScreenshotImageError.allocationFailed }
+            var read = 0
+            while read < count {
+                try Task.checkCancellation()
+                let result = pread(file.fileDescriptor, address.advanced(by: read), count - read, off_t(offset) + off_t(read))
+                if result < 0, errno == EINTR { continue }
+                guard result > 0 else { throw CocoaError(.fileReadUnknown) }
+                read += result
+            }
+            do { try operation() }
+            catch {
+                try? file.seek(toOffset: offset)
+                let backup = Data(bytesNoCopy: address, count: count, deallocator: .none)
+                try? file.write(contentsOf: backup)
+                try? file.truncate(atOffset: UInt64(height * width * 4))
+                throw error
+            }
+        }
     }
 
     func finish() throws -> LongScreenshotDocument? {
@@ -467,6 +526,7 @@ actor LongScreenshotStitcher: LongScreenshotStitching {
         let document = try LongScreenshotDocument(directory: directory, width: width, height: height, scale: scale)
         self.directory = nil
         previous = nil
+        rollbackPixels = Data()
         return document
     }
 }

@@ -55,6 +55,16 @@ extension LongScreenshotScrolling {
 }
 
 @MainActor struct SystemLongScreenshotScroll: LongScreenshotScrolling {
+    private let hitTest: (AXUIElement, CGPoint) -> AXUIElement?
+
+    init(hitTest: @escaping (AXUIElement, CGPoint) -> AXUIElement? = { root, point in
+        var element: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(root, Float(point.x), Float(point.y), &element) == .success else { return nil }
+        return element
+    }) {
+        self.hitTest = hitTest
+    }
+
     private func windows() -> [[String: Any]] {
         (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? [])
             .filter { ($0[kCGWindowOwnerPID as String] as? pid_t) != ProcessInfo.processInfo.processIdentifier
@@ -81,8 +91,9 @@ extension LongScreenshotScrolling {
         return target
     }
     func prepare(_ target: LongScreenshotTarget, region: LongScreenshotRegion) async throws {
-        try await LongScreenshotTargetReadiness.wait {
-            try validate(target, region: region)
+        try await LongScreenshotTargetReadiness.prepare(target: target, region: region,
+            ownProcessID: ProcessInfo.processInfo.processIdentifier) {
+            snapshot(target, region: region)
         } handoff: {
             guard let app = NSRunningApplication(processIdentifier: target.processID), !app.isTerminated else { return }
             NSApp.yieldActivation(to: app)
@@ -95,46 +106,56 @@ extension LongScreenshotScrolling {
     }
 
     private func snapshot(_ target: LongScreenshotTarget, region: LongScreenshotRegion) -> LongScreenshotTargetSnapshot {
-        let windows = windows()
-        func identity(_ window: [String: Any]) -> LongScreenshotWindowIdentity? {
-            guard let id = window[kCGWindowNumber as String] as? CGWindowID,
-                let pid = window[kCGWindowOwnerPID as String] as? pid_t, let frame = frame(window) else { return nil }
-            return LongScreenshotWindowIdentity(id: id, processID: pid, frame: frame)
+        guard CGPreflightScreenCaptureAccess() && AXIsProcessTrusted() && CGPreflightPostEventAccess() else {
+            return windowSnapshot(target, region: region)
         }
-        var snapshot = LongScreenshotTargetSnapshot(
-            hasPermission: CGPreflightScreenCaptureAccess() && AXIsProcessTrusted() && CGPreflightPostEventAccess(),
-            targetWindow: windows.first(where: { $0[kCGWindowNumber as String] as? CGWindowID == target.windowID }).flatMap(identity),
-            topWindow: windows.first(where: { frame($0)?.intersects(region.quartzRect) == true }).flatMap(identity))
-        guard snapshot.hasPermission else { return snapshot }
         // 部分正常前台应用会让系统级 AXFocusedApplication 持续返回无法完成或无值。
         // 使用工作空间的前台进程身份，再直接检查该进程窗口；接口缺值不能当成焦点丢失。
-        snapshot.frontmostProcessID = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        if let pid = snapshot.frontmostProcessID, pid == target.processID {
-            let focusedApp = AXUIElementCreateApplication(pid)
-            AXUIElementSetMessagingTimeout(focusedApp, 0.2)
+        let application = AXUIElementCreateApplication(target.processID)
+        AXUIElementSetMessagingTimeout(application, 0.2)
+        var focusedFrame: CGRect?
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier == target.processID {
             var focusedWindow: CFTypeRef?
-            if AXUIElementCopyAttributeValue(focusedApp, kAXFocusedWindowAttribute as CFString, &focusedWindow) == .success,
+            if AXUIElementCopyAttributeValue(application, kAXFocusedWindowAttribute as CFString, &focusedWindow) == .success,
                let focusedWindow, CFGetTypeID(focusedWindow) == AXUIElementGetTypeID() {
-                snapshot.focusedWindowFrame = accessibilityFrame(unsafeDowncast(focusedWindow, to: AXUIElement.self))
+                focusedFrame = accessibilityFrame(unsafeDowncast(focusedWindow, to: AXUIElement.self))
             }
         }
         // 辅助功能命中测试穿过系统的透明覆盖窗口，也能发现选区中心的弹出菜单与对话框。
         let system = AXUIElementCreateSystemWide()
         AXUIElementSetMessagingTimeout(system, 0.2)
-        var element: AXUIElement?
         let point = CGPoint(x: region.quartzRect.midX, y: region.quartzRect.midY)
+        var element = hitTest(system, point)
+        if element == nil {
+            // 系统级接口可能单独失效，直接询问目标应用补充命中信息。
+            element = hitTest(application, point)
+        }
         var pid: pid_t = 0
-        if AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &element) == .success,
-            let element, AXUIElementGetPid(element, &pid) == .success {
-            snapshot.hitProcessID = pid
+        var hitPID: pid_t?
+        var hitFrame: CGRect?
+        if let element, AXUIElementGetPid(element, &pid) == .success {
+            hitPID = pid
             var windowValue: CFTypeRef?
             if pid == target.processID,
                AXUIElementCopyAttributeValue(element, kAXWindowAttribute as CFString, &windowValue) == .success,
                let windowValue, CFGetTypeID(windowValue) == AXUIElementGetTypeID() {
-                snapshot.hitWindowFrame = accessibilityFrame(unsafeDowncast(windowValue, to: AXUIElement.self))
+                hitFrame = accessibilityFrame(unsafeDowncast(windowValue, to: AXUIElement.self))
             }
         }
+        // 跨进程查询返回后重新核验窗口和前台状态，不能据查询前的旧状态继续采集。
+        var snapshot = windowSnapshot(target, region: region)
+        snapshot.focusedWindowFrame = focusedFrame
+        snapshot.hitProcessID = hitPID
+        snapshot.hitWindowFrame = hitFrame
         return snapshot
+    }
+    private func windowSnapshot(_ target: LongScreenshotTarget, region: LongScreenshotRegion) -> LongScreenshotTargetSnapshot {
+        let windows = windows()
+        return LongScreenshotTargetSnapshot(
+            hasPermission: CGPreflightScreenCaptureAccess() && AXIsProcessTrusted() && CGPreflightPostEventAccess(),
+            targetWindow: windows.first { $0[kCGWindowNumber as String] as? CGWindowID == target.windowID }.flatMap(identity),
+            topWindow: windows.first { frame($0)?.intersects(region.quartzRect) == true }.flatMap(identity),
+            frontmostProcessID: NSWorkspace.shared.frontmostApplication?.processIdentifier)
     }
     private func accessibilityFrame(_ window: AXUIElement) -> CGRect? {
         AXUIElementSetMessagingTimeout(window, 0.2)
@@ -157,14 +178,8 @@ extension LongScreenshotScrolling {
         try Task.checkCancellation()
         // 高频小步只读窗口服务器和前台身份；完整辅助功能命中由取帧循环持续复核。
         // 不在每个刷新周期内发起多次跨进程辅助功能请求。
-        let windows = windows()
-        let own = ProcessInfo.processInfo.processIdentifier
-        let snapshot = LongScreenshotTargetSnapshot(
-            hasPermission: CGPreflightScreenCaptureAccess() && AXIsProcessTrusted() && CGPreflightPostEventAccess(),
-            targetWindow: windows.first { $0[kCGWindowNumber as String] as? CGWindowID == target.windowID }.flatMap(identity),
-            topWindow: windows.first { frame($0)?.intersects(region.quartzRect) == true }.flatMap(identity),
-            frontmostProcessID: NSWorkspace.shared.frontmostApplication?.processIdentifier)
-        try LongScreenshotTargetValidation.validateWindow(snapshot, target: target, region: region, ownProcessID: own)
+        try LongScreenshotTargetValidation.validateWindow(windowSnapshot(target, region: region), target: target, region: region,
+            ownProcessID: ProcessInfo.processInfo.processIdentifier)
         try post(points, target: target, region: region)
     }
     private func identity(_ window: [String: Any]) -> LongScreenshotWindowIdentity? {
@@ -268,10 +283,11 @@ extension LongScreenshotScrolling {
             do {
                 let target = try self.scroll.resolve(region)
                 self.target = target
+                // 选区退场后立即建立焦点交接基线，不能在异步启动屏幕流后才接受新的前台身份。
+                try await self.scroll.prepare(target, region: region)
                 try await LongScreenshotOperation.run(timeout: self.captureTimeout) { [capture = self.capture] in
                     try await capture.prepare(region)
                 }
-                try await self.scroll.prepare(target, region: region)
                 try self.check(version, target: target, region: region, deadline: deadline)
                 // 冻结选区已经关闭，从当前真实画面重新建立第一帧。
                 let first = try await self.stableFrame(version, target: target, region: region, deadline: deadline)
@@ -450,7 +466,7 @@ extension LongScreenshotScrolling {
 actor LongScreenshotFeatureWorker {
     static let shared = LongScreenshotFeatureWorker()
     func features(_ image: CGImage) async throws -> LongScreenshotFeatures {
-        let cost = image.height * (min(96, image.width) + min(384, image.width)) * 2
+        let cost = image.height * (min(96, image.width) + min(384, image.width)) * 3
         return try await ImageWorkBudget.shared.withPermit(estimatedBytes: cost, priority: .display) {
             try await self.makeFeatures(image)
         }

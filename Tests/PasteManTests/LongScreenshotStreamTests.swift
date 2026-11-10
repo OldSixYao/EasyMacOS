@@ -38,6 +38,29 @@ import Testing
         #expect(configuration.queueDepth == 3 && !configuration.showsCursor && !configuration.capturesAudio)
     }
 
+    @Test func unreadFramesSkipPixelCopiesAndResumeOnTheNextCompleteFrame() throws {
+        var buffer: CVPixelBuffer?
+        try #require(CVPixelBufferCreate(kCFAllocatorDefault, 96, 120, kCVPixelFormatType_32BGRA, nil, &buffer) == kCVReturnSuccess)
+        let pixels = try #require(buffer)
+        let mailbox = LongScreenshotFrameMailbox()
+        #expect(mailbox.publish(pixels, at: 1))
+        for index in 2...100 { #expect(!mailbox.publish(pixels, at: 1 + Double(index) / 3000)) }
+        let first = try #require(try mailbox.read())
+        #expect(first.sequence == 1 && first.time == 1)
+        #expect(mailbox.publish(pixels, at: 101))
+        #expect(!mailbox.publish(pixels, at: 101.01))
+        let next = try #require(try mailbox.read())
+        #expect(next.sequence == 2 && next.time == 101 && next.image !== first.image)
+        // 静止画面没有新回调时继续复用完整帧，不会等待一个永远不来的变化。
+        #expect(try mailbox.read()?.image === next.image)
+        #expect(mailbox.publish(pixels, at: 102))
+        #expect(mailbox.publish(pixels, at: 102.1), "处理较慢时，未消费的画面仍须限时刷新")
+        mailbox.fail(LongScreenshotError.captureTimedOut)
+        #expect(!mailbox.publish(pixels, at: 103))
+        mailbox.close()
+        #expect(!mailbox.publish(pixels, at: 104))
+    }
+
     @Test func screenBufferIsCopiedWithoutColorRoundingAndSurvivesSystemBufferReuse() throws {
         var buffer: CVPixelBuffer?
         try #require(CVPixelBufferCreate(kCFAllocatorDefault, 96, 120, kCVPixelFormatType_32BGRA, nil, &buffer) == kCVReturnSuccess)

@@ -1,6 +1,7 @@
 import AppKit
 import ImageIO
 import PasteManCore
+import Synchronization
 import Testing
 @testable import PasteMan
 
@@ -27,6 +28,144 @@ private func longPage(width: Int = 192, height: Int = 240, offset: Int = 0,
 private func longBytes(_ image: CGImage) -> Data { image.dataProvider!.data! as Data }
 
 @Suite("长截屏像素拼接") struct LongScreenshotImageTests {
+    @Test func translucentViewportTopEdgeDoesNotBecomeRepeatedSeams() async throws {
+        let width = 192, height = 240
+        func frame(_ offset: Int) -> CGImage {
+            let image = longPage(width: width, height: height, offset: offset)
+            guard offset > 0 else { return image }
+            var data = longBytes(image)
+            // 原生滚动容器会在视口顶部叠加一行半透明亮边，它不属于正文。
+            for x in 0..<width {
+                for channel in 0..<3 {
+                    let index = x * 4 + channel
+                    data[index] = UInt8((Int(data[index]) * 9 + 255) / 10)
+                }
+            }
+            return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
+                bytesPerRow: width * 4, space: image.colorSpace!, bitmapInfo: image.bitmapInfo,
+                provider: CGDataProvider(data: data as CFData)!, decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
+        }
+        let stitcher = LongScreenshotStitcher(scale: 2)
+        for offset in stride(from: 0, through: 288, by: 24) { _ = try await stitcher.append(frame(offset)) }
+        _ = try await stitcher.append(frame(288))
+        let document = try #require(try await stitcher.finish())
+        #expect(document.image.height == height + 288)
+        #expect(longBytes(document.image) == longBytes(longPage(width: width, height: height + 288)),
+            "滚动和停稳刷新均须保留已确认的顶部正文，不能把视口边缘反复写入长图")
+    }
+
+    @Test(arguments: [0, 23]) func failedOverlapRefreshRestoresEveryPreviouslyCapturedPixel(_ displacement: Int) async throws {
+        let calls = Mutex(0)
+        let stitcher = LongScreenshotStitcher(scale: 1, writeChunk: { file, data in
+            let count = calls.withLock { $0 += 1; return $0 }
+            if count == 4 { throw CocoaError(.fileWriteUnknown) }
+            try file.write(contentsOf: data)
+        })
+        let first = longPage(height: 480)
+        _ = try await stitcher.append(first)
+        do {
+            _ = try await stitcher.append(longPage(height: 480, offset: displacement))
+            Issue.record("第二条带写入失败时应停止刷新并恢复备份")
+        } catch let error as CocoaError { #expect(error.code == .fileWriteUnknown) }
+        let document = try #require(try await stitcher.finish())
+        #expect(document.image.height == 480)
+        #expect(longBytes(document.image) == longBytes(first), "已部分覆盖的重叠区及原文件长度都必须完整恢复")
+    }
+
+    @Test(arguments: [false, true], [false, true])
+    func stationaryFloatingButtonDoesNotLeaveRepeatedFragments(_ fixedBars: Bool, _ disappearsAtEnd: Bool) async throws {
+        let width = 192, frameHeight = 480
+        let top = fixedBars ? 20 : 0, bottom = fixedBars ? 18 : 0
+        func frame(_ offset: Int, floatingButton: Bool) -> CGImage {
+            let image = longPage(width: width, height: frameHeight, offset: offset, top: top, bottom: bottom)
+            guard floatingButton else { return image }
+            var data = longBytes(image)
+            let center = CGPoint(x: width / 2, y: frameHeight - 130)
+            for y in (Int(center.y) - 22)...(Int(center.y) + 22) {
+                for x in (Int(center.x) - 22)...(Int(center.x) + 22) {
+                    let distance = hypot(Double(x) - center.x, Double(y) - center.y)
+                    guard distance < 22 else { continue }
+                    let value: UInt8 = distance > 20 ? 120 : 28
+                    let index = (y * width + x) * 4
+                    data[index] = value; data[index + 1] = value; data[index + 2] = value
+                }
+            }
+            return CGImage(width: width, height: frameHeight, bitsPerComponent: 8, bitsPerPixel: 32,
+                bytesPerRow: width * 4, space: image.colorSpace!, bitmapInfo: image.bitmapInfo,
+                provider: CGDataProvider(data: data as CFData)!, decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
+        }
+        let stitcher = LongScreenshotStitcher(scale: 2)
+        // 按钮固定在视口底部上方，包含小于按钮高度的连续步长与最后一小步。
+        for offset in [0, 17, 35, 82, 141, 210, 245, 320] {
+            _ = try await stitcher.append(frame(offset, floatingButton: true))
+        }
+        _ = try await stitcher.append(frame(367, floatingButton: !disappearsAtEnd))
+        _ = try await stitcher.append(frame(367, floatingButton: !disappearsAtEnd))
+        let document = try #require(try await stitcher.finish())
+        let expected = longPage(width: width, height: frameHeight + 367, top: top, bottom: bottom)
+        let actual = longBytes(document.image)
+        var wanted = longBytes(expected)
+        if !disappearsAtEnd {
+            let finalFrame = longBytes(frame(367, floatingButton: true))
+            // 最终视口确实可见的按钮保留一次；历史视口里的残片不能留下。
+            for y in (frameHeight - 152)...(frameHeight - 108) {
+                let destination = (367 + y) * width * 4, source = y * width * 4
+                wanted.replaceSubrange(destination..<(destination + width * 4),
+                    with: finalFrame[source..<(source + width * 4)])
+            }
+        }
+        #expect(document.image.height == frameHeight + 367)
+        let incorrect = zip(actual, wanted).filter { $0 != $1 }.count
+        #expect(incorrect == 0, "重叠区应由实际页面像素覆盖，悬浮按钮最多在最终位置出现一次；错误字节 \(incorrect)")
+    }
+
+    @Test(arguments: [false, true]) func stripWritesPreserveTransparencyAndConvertWideGamutWhenNeeded(_ wideGamut: Bool) async throws {
+        let width = 96, height = 300
+        let colorSpace = try #require(CGColorSpace(name: wideGamut ? CGColorSpace.displayP3 : CGColorSpace.sRGB))
+        let context = try #require(CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+            bytesPerRow: width * 4, space: colorSpace, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        for y in 0..<height {
+            context.setFillColor(CGColor(colorSpace: colorSpace,
+                components: [0.8, CGFloat(y % 29) / 28, 0.2, CGFloat(y % 5) / 4])!)
+            context.fill(CGRect(x: 0, y: y, width: width, height: 1))
+        }
+        let image = try #require(context.makeImage())
+        let stitcher = LongScreenshotStitcher(scale: 1)
+        _ = try await stitcher.append(image)
+        let document = try #require(try await stitcher.finish())
+        let expected = try ScreenshotRenderer.render(base: image, pointSize: document.pointSize, annotations: [])
+        #expect(longBytes(document.image) == longBytes(expected), "标准色彩直接写行与宽色域转换均须保持原有透明度及颜色结果")
+    }
+
+    @Test func paddedBgraFramesKeepExactPixelsAcrossStripWritesAndRepeatedFooterRefresh() async throws {
+        func screenFrame(offset: Int) throws -> CGImage {
+            let image = longPage(offset: offset)
+            let rgba = longBytes(image)
+            let stride = image.width * 4 + 64
+            var bgra = Data(repeating: 0, count: stride * image.height)
+            for y in 0..<image.height {
+                for x in 0..<image.width {
+                    let source = (y * image.width + x) * 4, destination = y * stride + x * 4
+                    bgra[destination] = rgba[source + 2]
+                    bgra[destination + 1] = rgba[source + 1]
+                    bgra[destination + 2] = rgba[source]
+                    bgra[destination + 3] = rgba[source + 3]
+                }
+            }
+            return try #require(CGImage(width: image.width, height: image.height, bitsPerComponent: 8, bitsPerPixel: 32,
+                bytesPerRow: stride, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGBitmapInfo.byteOrder32Little.union(CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue)),
+                provider: CGDataProvider(data: bgra as CFData)!, decode: nil, shouldInterpolate: false, intent: .defaultIntent))
+        }
+        let stitcher = LongScreenshotStitcher(scale: 2)
+        for offset in [0, 17, 48, 48, 55, 111, 111] {
+            _ = try await stitcher.append(screenFrame(offset: offset))
+        }
+        let document = try #require(try await stitcher.finish())
+        #expect(document.image.height == 351)
+        #expect(longBytes(document.image) == longBytes(longPage(height: 351)))
+    }
+
     @Test func unequalStepsPartialLastFrameAndDuplicatesHaveNoMissingOrRepeatedRows() async throws {
         let stitcher = LongScreenshotStitcher(scale: 2)
         var offset = 0
@@ -447,11 +586,12 @@ private func longBytes(_ image: CGImage) -> Data { image.dataProvider!.data! as 
         view.mouseUp(with: try event(.leftMouseUp, CGPoint(x: 292, y: 340)))
         try #require(coordinator.phase == .editing)
         #expect(view.state.prefersLongScreenshot)
+        #expect(view.state.toolbarHeight == 46)
         return (coordinator, view, driver)
     }
     private func editing(save: @escaping (Data) async throws -> Bool = { _ in false }) async throws -> ScreenshotCoordinator {
         let (coordinator, view, _) = try await selected(save: save)
-        view.state.action?(.longScreenshot)
+        view.state.action?(.confirm)
         #expect(coordinator.isActive && coordinator.windows.isEmpty && view.window == nil)
         try await wait { coordinator.phase == .longEditing }
         return coordinator
@@ -461,13 +601,13 @@ private func longBytes(_ image: CGImage) -> Data { image.dataProvider!.data! as 
         defer { locked.cancel() }
         view.state.history.append(ScreenshotAnnotation(tool: .rectangle, points: [.zero, CGPoint(x: 20, y: 20)],
             color: AnnotationColor.palette[0], width: 3))
-        view.state.action?(.longScreenshot)
+        view.state.action?(.confirm)
         #expect(locked.phase == .editing && driver.events == 0)
         view.state.history = AnnotationHistory()
         var errors = 0
         locked.onError = { _ in errors += 1 }
         locked.validateLongAccess = { false }
-        view.state.action?(.longScreenshot)
+        view.state.action?(.confirm)
         #expect(locked.phase == .idle && driver.events == 0 && errors == 1)
         let editor = try await editing()
         editor.isEnabled = false
@@ -500,7 +640,7 @@ private func longBytes(_ image: CGImage) -> Data { image.dataProvider!.data! as 
         defer { coordinator.cancel() }
         let editor = try #require(coordinator.longEditor)
         coordinator.onCopy = { _, _, _ in false }
-        coordinator.finishLongScreenshot(.copy)
+        editor.state.action?(.confirm)
         try await wait { coordinator.phase != .exporting }
         #expect(coordinator.phase == .longEditing && editor.state.error != nil)
         var result: ScreenshotImage?
@@ -508,7 +648,7 @@ private func longBytes(_ image: CGImage) -> Data { image.dataProvider!.data! as 
             #expect(id == "test.page" && name == "测试页面")
             result = image; return true
         }
-        coordinator.finishLongScreenshot(.copy)
+        editor.state.action?(.confirm)
         try await wait { coordinator.phase != .exporting }
         #expect(coordinator.phase == .idle && coordinator.longEditor == nil)
         #expect(result?.image.height == 353 && result?.image.width == 192)
@@ -556,32 +696,35 @@ private func longBytes(_ image: CGImage) -> Data { image.dataProvider!.data! as 
         editor.canvas.mouseDown(with: event)
         let text = try #require(editor.canvas.subviews.compactMap { $0 as? NSTextView }.first)
         text.string = "长图底部文字"
-        editor.setZoom(fit: true)
+        editor.setZoom(.width)
         #expect(editor.state.history.annotations.last?.points.first == point)
         #expect(editor.state.history.annotations.last?.text == "长图底部文字")
         editor.state.action?(.undo); #expect(editor.state.history.annotations.isEmpty)
         editor.state.action?(.redo); #expect(editor.state.history.annotations.count == 1)
     }
 
-    @Test func previewCentersNarrowAndShortImagesAfterResizingAndZoomChanges() async throws {
+    @Test func previewFillsWidthAndKeepsAnnotationCoordinatesAfterResizing() async throws {
         let coordinator = try await editing()
         defer { coordinator.cancel() }
         let editor = try #require(coordinator.longEditor)
-        func expectCentered() throws {
+        func expectFilled() throws {
             let viewport = editor.scrollView.contentSize
             let frame = editor.canvas.frame
-            #expect(abs(frame.midX - viewport.width / 2) < 1, "窄图左右留白须相等")
-            if frame.height + 48 <= viewport.height {
-                #expect(abs(frame.midY - viewport.height / 2) < 1, "短图上下留白须相等")
-            }
+            #expect(frame.origin == .zero)
+            #expect(abs(frame.width - viewport.width) < 0.01, "默认图片须完整铺满视口宽度")
+            #expect(!editor.scrollView.hasHorizontalScroller)
+            #expect(abs(frame.width / frame.height - editor.document.pointSize.width / editor.document.pointSize.height) < 0.001,
+                "预览缩放须保持原图比例")
             #expect(editor.scrollView.contentView.bounds.origin == .zero)
         }
-        try expectCentered()
+        try expectFilled()
         editor.window.setContentSize(CGSize(width: 1100, height: 820))
         editor.windowDidResize(Notification(name: NSWindow.didResizeNotification))
-        try expectCentered()
-        editor.setZoom(fit: false); try expectCentered()
-        editor.setZoom(fit: true); try expectCentered()
+        try expectFilled()
+        editor.setZoom(.actual)
+        #expect(editor.canvas.frame.size == editor.document.pointSize)
+        #expect(editor.canvas.frame.origin == .zero)
+        editor.setZoom(.fill); try expectFilled()
         let logical = CGPoint(x: 41, y: 121)
         let location = editor.canvas.convert(CGPoint(x: logical.x * editor.zoom, y: logical.y * editor.zoom), to: nil)
         let event = try #require(NSEvent.mouseEvent(with: .leftMouseDown, location: location, modifierFlags: [],
@@ -589,32 +732,85 @@ private func longBytes(_ image: CGImage) -> Data { image.dataProvider!.data! as 
         editor.state.action?(.tool(.text))
         editor.canvas.mouseDown(with: event)
         let text = try #require(editor.canvas.subviews.compactMap { $0 as? NSTextView }.first)
-        text.string = "居中后坐标仍正确"
+        text.string = "铺满后坐标仍正确"
         editor.canvas.commitText()
         #expect(editor.state.history.annotations.last?.points.first == logical)
     }
 
-    @Test func longPreviewStaysCenteredAndZoomKeepsTheVisibleDocumentPosition() async throws {
+    @Test func longPreviewFillsWidthAndZoomKeepsTheVisibleDocumentPosition() async throws {
         let stitcher = LongScreenshotStitcher(scale: 1)
         _ = try await stitcher.append(longPage(width: 1200, height: 2400))
         let document = try #require(try await stitcher.finish())
         let editor = LongScreenshotEditor(document: document, notice: nil)
         defer { editor.close() }
         let viewport = editor.scrollView.contentSize
-        #expect(abs(editor.canvas.frame.midX - viewport.width / 2) < 1)
-        #expect(editor.canvas.frame.minY == 24)
+        #expect(abs(editor.canvas.frame.width - viewport.width) < 1)
+        #expect(editor.canvas.frame.origin == .zero)
         #expect(editor.canvas.frame.height > viewport.height && editor.scrollView.contentView.bounds.origin.y == 0)
+        #expect(editor.scrollView.verticalScroller?.isHidden == false)
+        #expect(!editor.scrollView.hasHorizontalScroller)
         editor.scrollView.contentView.scroll(to: CGPoint(x: 0, y: 440))
         editor.scrollView.reflectScrolledClipView(editor.scrollView.contentView)
         let oldPosition = (editor.scrollView.contentView.bounds.minY - editor.canvas.frame.minY) / editor.zoom
-        editor.setZoom(fit: false)
+        editor.setZoom(.actual)
         let actualPosition = (editor.scrollView.contentView.bounds.minY - editor.canvas.frame.minY) / editor.zoom
         #expect(abs(oldPosition - actualPosition) < 1)
         let container = try #require(editor.canvas.superview)
-        #expect(abs(editor.canvas.frame.midX - container.bounds.midX) < 1)
+        #expect(editor.canvas.frame.origin == .zero && container.bounds.origin == .zero)
         #expect(editor.canvas.frame.width > editor.scrollView.contentSize.width)
-        editor.setZoom(fit: true)
-        #expect(abs(editor.canvas.frame.midX - editor.scrollView.contentSize.width / 2) < 1)
+        #expect(!editor.scrollView.hasHorizontalScroller)
+        editor.setZoom(.width)
+        #expect(abs(editor.canvas.frame.width - editor.scrollView.contentSize.width) < 1)
+    }
+
+    @Test func shortWidePreviewFillsWidthWithoutHorizontalScrollbarAfterResizingAndModeChanges() async throws {
+        let stitcher = LongScreenshotStitcher(scale: 2)
+        _ = try await stitcher.append(longPage(width: 1628, height: 630))
+        let document = try #require(try await stitcher.finish())
+        let editor = LongScreenshotEditor(document: document, notice: nil)
+        defer { editor.close() }
+        for size in [CGSize(width: 920, height: 660), CGSize(width: 1120, height: 800), CGSize(width: 600, height: 500)] {
+            editor.window.setContentSize(size)
+            editor.windowDidResize(Notification(name: NSWindow.didResizeNotification))
+            let viewport = editor.scrollView.contentSize
+            #expect(editor.canvas.frame.origin == .zero)
+            #expect(abs(editor.canvas.frame.width - viewport.width) < 0.01)
+            #expect(abs(editor.canvas.frame.height - viewport.width * 630 / 1628) < 0.01,
+                "宽短图须按宽度等比例显示，不能按高度放大而截断左右内容")
+            #expect(!editor.scrollView.hasHorizontalScroller)
+            #expect(editor.scrollView.verticalScroller?.isHidden == true)
+            #expect(editor.scrollView.contentView.bounds.origin.x == 0)
+            #expect(editor.scrollView.scrollerStyle == .legacy && editor.scrollView.autohidesScrollers)
+            let savedZoom = editor.zoom
+            let savedFrame = editor.canvas.frame
+            editor.windowDidResize(Notification(name: NSWindow.didResizeNotification))
+            #expect(editor.zoom == savedZoom && editor.canvas.frame == savedFrame, "滚动条与缩放布局须稳定")
+        }
+        editor.setZoom(.width)
+        #expect(abs(editor.canvas.frame.width - editor.scrollView.contentSize.width) < 1)
+        #expect(!editor.scrollView.hasHorizontalScroller && editor.scrollView.verticalScroller?.isHidden == true)
+        editor.setZoom(.actual)
+        #expect(!editor.scrollView.hasHorizontalScroller && editor.zoom == 1)
+        editor.setZoom(.fill)
+        #expect(!editor.scrollView.hasHorizontalScroller)
+        #expect(abs(editor.canvas.frame.width - editor.scrollView.contentSize.width) < 0.01)
+        #expect(editor.scrollView.contentView.bounds.origin.x == 0)
+        #expect(document.image.width == 1628 && document.image.height == 630, "预览铺满不得裁剪原图")
+    }
+
+    @Test func toolbarPreviewActionsChangeScaleAndKeepTheSelectedMode() async throws {
+        let coordinator = try await editing()
+        defer { coordinator.cancel() }
+        let editor = try #require(coordinator.longEditor)
+        #expect(editor.state.previewMode == .fill)
+        editor.state.action?(.preview(.actual))
+        #expect(editor.zoom == 1 && editor.state.previewMode == .actual)
+        editor.state.action?(.preview(.width))
+        #expect(editor.state.previewMode == .width)
+        #expect(abs(editor.canvas.frame.width - editor.scrollView.contentSize.width) < 0.01)
+        editor.state.action?(.preview(.fill))
+        #expect(editor.state.previewMode == .fill && !editor.scrollView.hasHorizontalScroller)
+        #expect(editor.window.minSize.width >= editor.state.toolbarWidth)
     }
 
     @Test func currentResultCanBeReopenedWithoutStartingAnotherCaptureOrDiscardingAnnotations() async throws {
@@ -643,6 +839,12 @@ private func longBytes(_ image: CGImage) -> Data { image.dataProvider!.data! as 
         defer { model.cancelRefresh() }
         let delegate = AppDelegate(screenshots: coordinator)
         let menu = delegate.makeStatusMenu(for: model)
+        let longScreenshotItem = try #require(menu.items.first { $0.action == NSSelectorFromString("startLongScreenshot") })
+        #expect(longScreenshotItem.title.hasSuffix("  " + settings.longScreenshotShortcut.label))
+        settings.longScreenshotShortcut = settings.shortcut
+        let updatedMenu = delegate.makeStatusMenu(for: model)
+        let updatedItem = try #require(updatedMenu.items.first { $0.action == NSSelectorFromString("startLongScreenshot") })
+        #expect(updatedItem.title.hasSuffix("  " + settings.shortcut.label))
         for action in ["startScreenshot", "startLongScreenshot", "startFullScreenRecording", "startRegionRecording"] {
             let item = try #require(menu.items.first { $0.action == NSSelectorFromString(action) })
             #expect(!item.isEnabled)
@@ -656,6 +858,86 @@ private func longBytes(_ image: CGImage) -> Data { image.dataProvider!.data! as 
 
 @Suite("长截屏界面外观", .serialized, .enabled(if: ProcessInfo.processInfo.environment["EASYMACOS_LONG_UI"] == "1"))
 @MainActor struct LongScreenshotAppearanceTests {
+    @Test func toolbarHoverTipsFollowEachIconInsteadOfTheHeaderBottom() async throws {
+        _ = NSApplication.shared
+        let stitcher = LongScreenshotStitcher(scale: 1)
+        _ = try await stitcher.append(longPage(width: 800, height: 1400))
+        let document = try #require(try await stitcher.finish())
+        let editor = LongScreenshotEditor(document: document, notice: nil)
+        defer { editor.close() }
+        editor.state.optionsExpanded = true
+        editor.refresh(); editor.show()
+        try await Task.sleep(for: .milliseconds(180))
+        let content = try #require(editor.window.contentView)
+        func anchors(_ view: NSView) -> [ScreenshotHoverAnchorView] {
+            (view as? ScreenshotHoverAnchorView).map { [$0] } ?? view.subviews.flatMap(anchors)
+        }
+        let controls = anchors(content)
+        for mode in ScreenshotPreviewMode.allCases {
+            let anchor = try #require(controls.first { $0.title == mode.title })
+            let button = editor.window.convertToScreen(anchor.convert(anchor.bounds, to: nil))
+            #expect(button.width <= 34 && button.height <= 34, "缩放控件必须是工具栏图标按钮")
+            let event = try #require(NSEvent.enterExitEvent(with: .mouseEntered, location: .zero, modifierFlags: [],
+                timestamp: 0, windowNumber: editor.window.windowNumber, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil))
+            anchor.mouseEntered(with: event)
+            let tip = try #require(editor.window.childWindows?.first { $0.ignoresMouseEvents })
+            #expect(abs(button.minY - tip.frame.maxY - 5) < 1, "提示必须紧贴当前图标，不能位于第二行下面")
+            #expect(abs(tip.frame.midX - button.midX) < 1)
+            let label = try #require(tip.contentView?.subviews.compactMap { $0 as? NSTextField }.first)
+            #expect(label.stringValue == mode.title, "可见提示只显示简短名称")
+            anchor.mouseExited(with: event)
+            #expect(editor.window.childWindows?.isEmpty != false)
+        }
+        let undo = try #require(controls.first { $0.title.contains("⌘Z") && !$0.title.contains("⇧") })
+        let event = try #require(NSEvent.enterExitEvent(with: .mouseEntered, location: .zero, modifierFlags: [],
+            timestamp: 0, windowNumber: editor.window.windowNumber, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil))
+        undo.mouseEntered(with: event)
+        #expect(editor.window.childWindows?.isEmpty == false, "禁用的撤销按钮仍可查看名称")
+        editor.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification))
+        #expect(editor.window.childWindows?.isEmpty != false)
+    }
+
+    @Test func wideResultFitsEntireWidthInBothAppearancesWithoutHorizontalScrollbar() async throws {
+        _ = NSApplication.shared
+        let sample = try #require(CGContext(data: nil, width: 1628, height: 630, bitsPerComponent: 8,
+            bytesPerRow: 1628 * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        sample.setFillColor(CGColor(gray: 0.12, alpha: 1))
+        sample.fill(CGRect(x: 0, y: 0, width: 1628, height: 630))
+        for x in stride(from: 0, to: 1628, by: 200) {
+            sample.setFillColor(CGColor(red: CGFloat(x % 330) / 330, green: 0.45, blue: 0.65, alpha: 1))
+            sample.fill(CGRect(x: x, y: 0, width: 100, height: 630))
+        }
+        let stitcher = LongScreenshotStitcher(scale: 2)
+        _ = try await stitcher.append(try #require(sample.makeImage()))
+        let document = try #require(try await stitcher.finish())
+        let root = URL(fileURLWithPath: ProcessInfo.processInfo.environment["EASYMACOS_LONG_OUTPUT"] ?? "/tmp/easymacos-long-ui")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        for dark in [false, true] {
+            let editor = LongScreenshotEditor(document: document, notice: nil)
+            defer { editor.close() }
+            editor.window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            for resized in [false, true] {
+                if resized {
+                    editor.window.setContentSize(CGSize(width: 1100, height: 800))
+                    editor.windowDidResize(Notification(name: NSWindow.didResizeNotification))
+                }
+                editor.canvas.requestVisibleTiles()
+                try await Task.sleep(for: .milliseconds(300))
+                let viewport = editor.scrollView.contentSize
+                #expect(editor.canvas.frame.origin == .zero && abs(editor.canvas.frame.width - viewport.width) < 0.01)
+                #expect(!editor.scrollView.hasHorizontalScroller && editor.scrollView.verticalScroller?.isHidden == true)
+                #expect(editor.scrollView.contentView.bounds.origin.x == 0)
+                let content = try #require(editor.window.contentView)
+                content.layoutSubtreeIfNeeded()
+                let bitmap = try #require(content.bitmapImageRepForCachingDisplay(in: content.bounds))
+                content.cacheDisplay(in: content.bounds, to: bitmap)
+                try #require(bitmap.representation(using: .png, properties: [:])).write(to: root.appendingPathComponent(
+                    "wide-\(dark ? "dark" : "light")-\(resized ? "resized" : "initial").png"))
+            }
+        }
+    }
+
     @Test func chineseEnglishAndLightDarkEditorsKeepFixedToolbarAndScrollableCanvas() async throws {
         _ = NSApplication.shared
         let language = L.language
@@ -674,7 +956,7 @@ private func longBytes(_ image: CGImage) -> Data { image.dataProvider!.data! as 
             sample.fill(CGRect(x: 0, y: row * 80, width: 560, height: 80))
             ScreenshotRenderer.draw(ScreenshotAnnotation(tool: .text, points: [CGPoint(x: 30, y: row * 80 + 24)],
                 color: AnnotationColor(red: 0.18, green: 0.22, blue: 0.28), width: 3,
-                text: "第 \(row + 1) 段 · 居中预览与原始像素"), in: sample)
+                text: "第 \(row + 1) 段 · 铺满预览与原始像素"), in: sample)
         }
         let stitcher = LongScreenshotStitcher(scale: 1)
         _ = try await stitcher.append(try #require(sample.makeImage()))
@@ -696,6 +978,8 @@ private func longBytes(_ image: CGImage) -> Data { image.dataProvider!.data! as 
                 try await Task.sleep(for: .milliseconds(200))
                 #expect(editor.scrollView.frame == scrollFrame)
                 #expect(editor.canvas.frame.height > editor.scrollView.frame.height)
+                #expect(abs(editor.canvas.frame.width - editor.scrollView.contentSize.width) < 0.01)
+                #expect(!editor.scrollView.hasHorizontalScroller && editor.scrollView.verticalScroller?.isHidden == false)
                 #expect(editor.state.tool == .rectangle && editor.state.isLongEditor)
                 #expect(editor.window.title == (chinese ? "长截屏" : "Scrolling screenshot"))
                 let view = try #require(editor.window.contentView)

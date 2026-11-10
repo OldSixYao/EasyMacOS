@@ -115,12 +115,15 @@ enum HotKeyAction: UInt32, CaseIterable {
     case recordRegion = 4
     case recordPause = 5
     case recordStop = 6
+    case longScreenshot = 7
 
+    static let screenshotActions: [Self] = [.screenshot, .longScreenshot]
     static let recordingActions: [Self] = [.recordFullScreen, .recordRegion, .recordPause, .recordStop]
     var defaultShortcut: Shortcut {
         switch self {
         case .history: .default
         case .screenshot: .screenshot
+        case .longScreenshot: .longScreenshot
         case .recordFullScreen: Shortcut(keyCode: UInt32(kVK_ANSI_R), modifiers: UInt32(controlKey | optionKey), keyLabel: "R")
         case .recordRegion: Shortcut(keyCode: UInt32(kVK_ANSI_R), modifiers: UInt32(controlKey | optionKey | shiftKey), keyLabel: "R")
         case .recordPause: Shortcut(keyCode: UInt32(kVK_ANSI_P), modifiers: UInt32(controlKey | optionKey), keyLabel: "P")
@@ -131,6 +134,7 @@ enum HotKeyAction: UInt32, CaseIterable {
         switch self {
         case .history: L.t("History panel", "历史面板")
         case .screenshot: L.t("Screenshot", "截图")
+        case .longScreenshot: L.t("Scrolling Screenshot", "长截屏")
         case .recordFullScreen: L.t("Record full screen", "全屏录制")
         case .recordRegion: L.t("Record a region", "区域录制")
         case .recordPause: L.t("Pause / resume", "暂停／继续")
@@ -142,6 +146,7 @@ enum HotKeyAction: UInt32, CaseIterable {
 @MainActor final class HotKeyService {
     var onInvoke: (() -> Void)?
     var onScreenshot: (() -> Void)?
+    var onLongScreenshot: (() -> Void)?
     var onScreenRecording: ((HotKeyAction) -> Void)?
     private var hotKeys: [HotKeyAction: EventHotKeyRef] = [:]
     private var handler: EventHandlerRef?
@@ -179,6 +184,7 @@ enum HotKeyAction: UInt32, CaseIterable {
         switch action {
         case .history: onInvoke?()
         case .screenshot: onScreenshot?()
+        case .longScreenshot: onLongScreenshot?()
         case .recordFullScreen, .recordRegion, .recordPause, .recordStop: onScreenRecording?(action)
         }
     }

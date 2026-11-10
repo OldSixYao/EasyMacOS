@@ -342,7 +342,7 @@ private func pixel(_ image: CGImage, _ x: Int, _ y: Int) -> [UInt8] {
         let (coordinator, view) = try await editor()
         defer { coordinator.cancel() }
         coordinator.onCopy = { _, _, _ in false }
-        view.state.action?(.copy)
+        view.state.action?(.confirm)
         try await waitForExport(coordinator)
         #expect(coordinator.phase == .editing && view.state.error != nil)
         var copied: ScreenshotImage?
@@ -351,7 +351,7 @@ private func pixel(_ image: CGImage, _ x: Int, _ y: Int) -> [UInt8] {
             #expect(id == "test.editor" && name == "Editor")
             return true
         }
-        view.state.action?(.copy)
+        view.state.action?(.confirm)
         try await waitForExport(coordinator)
         #expect(coordinator.phase == .idle && coordinator.windows.isEmpty)
         let value = try #require(copied)
@@ -588,23 +588,32 @@ private func pixel(_ image: CGImage, _ x: Int, _ y: Int) -> [UInt8] {
         defer { defaults.removePersistentDomain(forName: suite) }
         let settings = AppSettings(defaults: defaults)
         #expect(settings.screenshotShortcut.label == "⌃⌥A")
+        #expect(settings.shortcut(for: .longScreenshot).label == "⌃⌥⇧A")
         settings.screenshotShortcut = Shortcut(
             keyCode: UInt32(kVK_ANSI_S), modifiers: UInt32(controlKey | optionKey), keyLabel: "S")
+        let longShortcut = Shortcut(
+            keyCode: UInt32(kVK_ANSI_L), modifiers: UInt32(controlKey | optionKey | shiftKey), keyLabel: "L")
+        settings.setShortcut(longShortcut, for: .longScreenshot)
         let loaded = AppSettings(defaults: defaults)
         #expect(loaded.screenshotShortcut.label == "⌃⌥S" && loaded.shortcut.label == "⇧⌘V")
+        #expect(loaded.shortcut(for: .longScreenshot) == longShortcut)
         let keys = HotKeyService()
         defer { keys.stop() }
         var history = 0
         var screenshots = 0
+        var longScreenshots = 0
         keys.onInvoke = { history += 1 }
         keys.onScreenshot = { screenshots += 1 }
+        keys.onLongScreenshot = { longScreenshots += 1 }
         keys.invoke(.history)
         keys.invoke(.screenshot)
-        #expect(history == 1 && screenshots == 1)
+        keys.invoke(.longScreenshot)
+        #expect(history == 1 && screenshots == 1 && longScreenshots == 1)
         keys.record { _ in }
         keys.invoke(.history)
         keys.invoke(.screenshot)
-        #expect(history == 1 && screenshots == 1)
+        keys.invoke(.longScreenshot)
+        #expect(history == 1 && screenshots == 1 && longScreenshots == 1)
         keys.cancelRecording()
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -613,7 +622,20 @@ private func pixel(_ image: CGImage, _ x: Int, _ y: Int) -> [UInt8] {
             permissions: PermissionService(), hotKeys: keys)
         #expect(!model.applyShortcut(settings.shortcut, for: .screenshot))
         #expect(!model.applyShortcut(settings.screenshotShortcut, for: .history))
+        #expect(!model.applyShortcut(settings.shortcut, for: .longScreenshot))
+        #expect(!model.applyShortcut(settings.screenshotShortcut, for: .longScreenshot))
+        #expect(!model.applyShortcut(settings.shortcut(for: .recordRegion), for: .longScreenshot))
+        #expect(!model.applyShortcut(longShortcut, for: .screenshot))
+        #expect(!model.applyShortcut(longShortcut, for: .history))
+        #expect(!model.applyShortcut(longShortcut, for: .recordFullScreen))
+        #expect(settings.longScreenshotShortcut == longShortcut && model.shortcutIssues[.longScreenshot] != nil)
         #expect(settings.screenshotShortcut.label == "⌃⌥S" && settings.shortcut.label == "⇧⌘V")
+        settings.screenshotEnabled = false
+        #expect(!settings.moduleEnabled(for: .longScreenshot) && settings.screenRecordingEnabled)
+        #expect(model.applyShortcut(HotKeyAction.longScreenshot.defaultShortcut, for: .longScreenshot))
+        #expect(model.shortcutIssues[.longScreenshot] == nil)
+        #expect(AppSettings(defaults: defaults).longScreenshotShortcut == .longScreenshot)
+        #expect(!model.applyShortcut(settings.shortcut, for: .longScreenshot))
         settings.screenRecordingEnabled = false
         let previous = settings.shortcut(for: .recordFullScreen)
         #expect(!model.applyShortcut(settings.shortcut, for: .recordFullScreen))

@@ -49,11 +49,13 @@ import Foundation
     private func applyScreenshot() {
         hotKeys.cancelRecording()
         screenshots.isEnabled = settings.screenshotEnabled
-        if settings.screenshotEnabled {
-            register(settings.screenshotShortcut, for: .screenshot)
-        } else {
-            hotKeys.unregister(for: .screenshot)
-            onShortcutIssue?(.screenshot, nil)
+        for action in HotKeyAction.screenshotActions {
+            if settings.screenshotEnabled {
+                register(settings.shortcut(for: action), for: action)
+            } else {
+                hotKeys.unregister(for: action)
+                onShortcutIssue?(action, nil)
+            }
         }
     }
 
@@ -81,7 +83,7 @@ import Foundation
         monitor.stop()
         screenshots.isEnabled = false
         hotKeys.unregister(for: .history)
-        hotKeys.unregister(for: .screenshot)
+        for action in HotKeyAction.screenshotActions { hotKeys.unregister(for: action) }
         for action in HotKeyAction.recordingActions { hotKeys.unregister(for: action) }
     }
 }

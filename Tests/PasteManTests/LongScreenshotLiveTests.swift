@@ -3,12 +3,56 @@ import ScreenCaptureKit
 import Testing
 @testable import PasteMan
 
+@Suite("长截屏可见后台窗口焦点交接", .serialized,
+       .enabled(if: ProcessInfo.processInfo.environment["EASYMACOS_LONG_INITIAL_FOCUS"] == "1"))
+@MainActor struct LongScreenshotInitialFocusLiveTests {
+    @Test func visibleInactiveWindowIsFocusedBeforeScrolling() async throws {
+        try #require(CGPreflightScreenCaptureAccess() && AXIsProcessTrusted() && CGPreflightPostEventAccess())
+        _ = NSApplication.shared
+        let environment = ProcessInfo.processInfo.environment
+        let url = URL(fileURLWithPath: try #require(environment["EASYMACOS_LONG_SCENE"]))
+        let geometry = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let pid = try #require(geometry["pid"] as? pid_t)
+        let scene = try #require(NSRunningApplication(processIdentifier: pid))
+        let foregroundPID = try #require(environment["EASYMACOS_LONG_FOREGROUND_PID"].flatMap(Int32.init))
+        let foreground = try #require(NSRunningApplication(processIdentifier: foregroundPID))
+        let previous = NSWorkspace.shared.frontmostApplication
+        defer { previous?.activate(from: .current, options: []) }
+        func activate(_ application: NSRunningApplication) async throws {
+            application.activate(from: .current, options: [])
+            let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+            while NSWorkspace.shared.frontmostApplication?.processIdentifier != application.processIdentifier,
+                  ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+            try #require(NSWorkspace.shared.frontmostApplication?.processIdentifier == application.processIdentifier)
+        }
+        try await activate(scene)
+        try await activate(foreground)
+        func value(_ key: String) throws -> CGFloat { CGFloat(try #require(geometry[key] as? Double)) }
+        let rect = try CGRect(x: value("x"), y: value("y"), width: value("width"), height: value("height"))
+        let screen = try #require(NSScreen.screens.first { $0.frame.contains(rect) })
+        let id = try #require(screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32)
+        let region = LongScreenshotRegion(screen: ScreenshotScreen(id: id, frame: screen.frame, scale: screen.backingScaleFactor),
+            selection: CGRect(x: rect.minX - screen.frame.minX + 40, y: screen.frame.maxY - rect.maxY + 40,
+                width: rect.width - 80, height: rect.height - 80), desktopTop: try value("desktopTop"))
+        let driver = SystemLongScreenshotScroll()
+        let target = try driver.resolve(region)
+        try #require(target.processID == pid, "只能交接到本轮合成窗口，前台测试窗口不得遮挡选区")
+        #expect(throws: LongScreenshotTargetError.applicationChanged) { try driver.validate(target, region: region) }
+        try await driver.prepare(target, region: region)
+        try driver.validate(target, region: region)
+        #expect(NSWorkspace.shared.frontmostApplication?.processIdentifier == pid)
+        print("可见后台窗口实机检查：初始前台不同，准备后目标获得焦点且完整校验通过；未采集图片或发送滚轮。")
+    }
+}
+
 @Suite("长截屏真实前台焦点", .serialized,
        .enabled(if: ProcessInfo.processInfo.environment["EASYMACOS_LONG_FOCUS_TARGET_PID"] != nil))
 @MainActor struct LongScreenshotFrontmostLiveTests {
     @Test func frontmostWindowCanPrepareWithoutGlobalAccessibilityFocus() async throws {
         try #require(CGPreflightScreenCaptureAccess() && AXIsProcessTrusted() && CGPreflightPostEventAccess())
-        let pid = try #require(ProcessInfo.processInfo.environment["EASYMACOS_LONG_FOCUS_TARGET_PID"].flatMap(Int32.init))
+        let requestedTarget = ProcessInfo.processInfo.environment["EASYMACOS_LONG_FOCUS_TARGET_PID"]
+        let pid = try #require(requestedTarget == "frontmost"
+            ? NSWorkspace.shared.frontmostApplication?.processIdentifier : requestedTarget.flatMap(Int32.init))
         try #require(NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
             "只检查已在前台的指定测试窗口，不主动激活、采集图片或发送滚轮")
         let windows = try #require(CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
@@ -38,6 +82,15 @@ import Testing
         try #require(target.processID == pid)
         try await driver.prepare(target, region: region)
         try driver.validate(target, region: region)
+        var missingHitChecks = 0
+        let unavailableHit = SystemLongScreenshotScroll(hitTest: { _, _ in
+            missingHitChecks += 1
+            return nil
+        })
+        // 只替换辅助功能命中边界；窗口编号、位置、遮挡、真实前台与权限继续读取系统。
+        try await unavailableHit.prepare(target, region: region)
+        try unavailableHit.validate(target, region: region)
+        #expect(missingHitChecks >= 6, "系统与应用级命中均缺值时，真实有效窗口仍可完成连续准备")
         #expect(NSWorkspace.shared.frontmostApplication?.processIdentifier == pid)
     }
 }
@@ -208,6 +261,23 @@ import Testing
         let isWeb = geometry["web"] as? Bool == true
         try output.png.write(to: root.appendingPathComponent(isWeb ? "web.png" : "native.png"))
         try #require(result.image.height == expectedHeight, "实际高度 \(result.image.height)，预期 \(expectedHeight)")
+        if geometry["floatingButton"] as? Bool == true {
+            let raw = try #require(result.image.dataProvider?.data as Data?)
+            var markedRows: [Int] = []
+            for y in 0..<result.image.height {
+                var marked = 0
+                for x in (result.image.width / 2 - 50)..<(result.image.width / 2 + 50) {
+                    let index = y * result.image.bytesPerRow + x * 4
+                    if raw[index] < 26, raw[index + 1] > 150, raw[index + 1] < 185, raw[index + 2] > 225 { marked += 1 }
+                }
+                if marked >= 2 { markedRows.append(y) }
+            }
+            let first = try #require(markedRows.first, "最终视口中的合成悬浮按钮仍应存在")
+            let last = try #require(markedRows.last)
+            #expect(last - first <= Int(44 * screen.backingScaleFactor),
+                "悬浮圆弧只能位于最终按钮所在区域，不能沿长图重复；标记纵向跨度 \(last - first)")
+            #expect(first > result.image.height - Int(170 * screen.backingScaleFactor), "历史视口不应留下圆弧残影")
+        }
         let context = try #require(CGContext(data: nil, width: result.image.width, height: result.image.height, bitsPerComponent: 8,
             bytesPerRow: result.image.width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
         context.draw(result.image, in: CGRect(x: 0, y: 0, width: result.image.width, height: result.image.height))

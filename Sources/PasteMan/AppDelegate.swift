@@ -142,6 +142,7 @@ import SwiftUI
             }
             configureScreenRecording(settings: settings, permissions: permissions, keys: keys)
             keys.onScreenshot = { [weak self] in self?.startScreenshot() }
+            keys.onLongScreenshot = { [weak self] in self?.startLongScreenshot() }
             screenshotController.onError = { message in
                 let alert = NSAlert()
                 alert.messageText = L.t("Screenshot unavailable", "无法截图")
@@ -459,7 +460,8 @@ import SwiftUI
         addMenu(
             menu, L.t("Screenshot", "截图") + "  " + model.settings.screenshotShortcut.label, #selector(startScreenshot),
             enabled: model.settings.screenshotEnabled && !screenRecorder.isActive && screenshots?.isActive != true)
-        addMenu(menu, L.t("Scrolling Screenshot…", "长截屏…"), #selector(startLongScreenshot),
+        addMenu(menu, L.t("Scrolling Screenshot…", "长截屏…") + "  " + model.settings.longScreenshotShortcut.label,
+                #selector(startLongScreenshot),
                 enabled: model.settings.screenshotEnabled && !screenRecorder.isActive && screenshots?.isActive != true)
         if screenshots?.phase == .longCapturing {
             addMenu(menu, L.t("Stop Scrolling Screenshot and Edit", "停止长截屏并编辑"), #selector(stopLongScreenshot))

@@ -186,6 +186,13 @@ struct SettingsView: View {
                 Text(L.t("Capture", "截图"))
             }
             .disabled(!settings.screenshotEnabled)
+            Section {
+                shortcutRow(for: .longScreenshot)
+                shortcutFeedback(for: .longScreenshot)
+            } header: {
+                Text(HotKeyAction.longScreenshot.title)
+            }
+            .disabled(!settings.screenshotEnabled)
         }.formStyle(.grouped)
     }
 

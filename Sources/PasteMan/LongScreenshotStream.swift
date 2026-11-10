@@ -2,7 +2,7 @@ import AppKit
 import ScreenCaptureKit
 import os
 
-/// 只保留最新一帧，不让采集队列积压。静止画面可复用最近的完整帧。
+/// 只保留一个完整帧，未消费时限频刷新，读取后立即接收下一帧；静止画面可复用。
 final class LongScreenshotFrameMailbox: Sendable {
     struct Frame: Sendable {
         let image: CGImage
@@ -12,6 +12,8 @@ final class LongScreenshotFrameMailbox: Sendable {
     private struct State {
         var latest: Frame?
         var nextSequence = 0
+        var lastReadSequence = 0
+        var copying = false
         var closed = false
         var failure: Error?
     }
@@ -24,10 +26,27 @@ final class LongScreenshotFrameMailbox: Sendable {
             $0.latest = Frame(image: image, time: time, sequence: $0.nextSequence)
         }
     }
+    @discardableResult func publish(_ pixels: CVPixelBuffer, at time: TimeInterval) -> Bool {
+        // 未消费的帧最多每十二分之一秒刷新一次；慢速拼接时减少无用复制，
+        // 又不会在处理很慢时一直保留过期画面。消费者取走后，下一完整帧立即更新。
+        let requested = state.withLock { state in
+            let stale = state.latest.map { time - $0.time >= 1.0 / 12 } ?? true
+            guard !state.closed, state.failure == nil, !state.copying,
+                stale || state.lastReadSequence == state.nextSequence else { return false }
+            state.copying = true
+            return true
+        }
+        guard requested else { return false }
+        defer { state.withLock { $0.copying = false } }
+        guard let image = LongScreenshotStreamImage.copy(pixels) else { return false }
+        publish(image, at: time)
+        return true
+    }
     func read() throws -> Frame? {
         try state.withLock {
             if let failure = $0.failure { throw failure }
             if $0.closed { throw CancellationError() }
+            $0.lastReadSequence = $0.nextSequence
             return $0.latest
         }
     }
@@ -61,9 +80,7 @@ private final class LongScreenshotStreamOutput: NSObject, SCStreamOutput, SCStre
             let raw = attachments.first?[.status] as? Int, SCFrameStatus(rawValue: raw) == .complete,
             let pixels = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         autoreleasepool {
-            if let image = LongScreenshotStreamImage.copy(pixels) {
-                mailbox.publish(image, at: ProcessInfo.processInfo.systemUptime)
-            }
+            _ = mailbox.publish(pixels, at: ProcessInfo.processInfo.systemUptime)
         }
     }
     func stream(_ stream: SCStream, didStopWithError error: Error) { mailbox.fail(error) }

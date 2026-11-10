@@ -34,6 +34,7 @@ MainActor.assumeIsolated {
     let app = NSApplication.shared
     app.setActivationPolicy(.regular)
     let isWeb = CommandLine.arguments.contains("--web")
+    let hasFloatingButton = CommandLine.arguments.contains("--floating-button")
     let screen = NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1200, height: 900)
     let size = CGSize(width: min(820, screen.width - 80), height: min(600, screen.height - 100))
     let window = NSWindow(contentRect: CGRect(x: screen.midX - size.width / 2, y: screen.midY - size.height / 2,
@@ -67,7 +68,8 @@ MainActor.assumeIsolated {
         let value: [String: Any] = ["x": rect.minX, "y": rect.minY, "width": rect.width, "height": rect.height,
             "scale": window.backingScaleFactor, "desktopTop": NSScreen.screens.first!.frame.maxY,
             "expectedHeight": 55 * 44 + (isWeb ? 88 : 0), "top": isWeb ? 56 : 0,
-            "bottom": isWeb ? 32 : 0, "pid": ProcessInfo.processInfo.processIdentifier, "web": isWeb]
+            "bottom": isWeb ? 32 : 0, "pid": ProcessInfo.processInfo.processIdentifier, "web": isWeb,
+            "floatingButton": hasFloatingButton]
         try! JSONSerialization.data(withJSONObject: value, options: .prettyPrinted).write(to: URL(fileURLWithPath: destination))
         print("合成画面已就绪：\(destination)"); fflush(stdout)
     }
@@ -88,8 +90,9 @@ MainActor.assumeIsolated {
         header,footer{position:fixed;left:0;right:0;z-index:5;color:white;padding:14px 24px;background:#205b72}
         header{top:0;height:56px}footer{bottom:0;height:32px;padding:6px 24px;background:#594577}
         .row{height:44px;position:relative;padding:12px 48px}.row:nth-child(even){background:#f2f2f2}
+        .floating-button{position:fixed;z-index:10;left:calc(50% - 20px);bottom:110px;width:40px;height:40px;border:2px solid #12a8eb;border-radius:50%;background:#141414;color:white;line-height:36px;text-align:center}
         i{position:absolute;left:24px;top:0;bottom:0;width:12px}span{position:absolute;left:65%;top:9px;height:26px;box-shadow:80px 0 currentColor,160px 0 currentColor}
-        </style><header>固定顶部 · 自动滚动长截屏</header>\(rows)<footer>固定底部 · 仅在成片末尾保留</footer></html>
+        </style><header>固定顶部 · 自动滚动长截屏</header>\(rows)<footer>固定底部 · 仅在成片末尾保留</footer>\(hasFloatingButton ? "<div class='floating-button'>↓</div>" : "")</html>
         """, baseURL: nil)
     } else {
         let scroll = NSScrollView(frame: CGRect(origin: .zero, size: size))

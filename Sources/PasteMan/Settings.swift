@@ -10,6 +10,8 @@ struct Shortcut: Codable, Equatable {
     static let `default` = Shortcut(keyCode: UInt32(kVK_ANSI_V), modifiers: UInt32(cmdKey | shiftKey), keyLabel: "V")
     static let screenshot = Shortcut(
         keyCode: UInt32(kVK_ANSI_A), modifiers: UInt32(controlKey | optionKey), keyLabel: "A")
+    static let longScreenshot = Shortcut(
+        keyCode: UInt32(kVK_ANSI_A), modifiers: UInt32(controlKey | optionKey | shiftKey), keyLabel: "A")
     func matches(_ other: Shortcut) -> Bool { keyCode == other.keyCode && modifiers == other.modifiers }
     var label: String {
         [(UInt32(controlKey), "⌃"), (UInt32(optionKey), "⌥"), (UInt32(shiftKey), "⇧"), (UInt32(cmdKey), "⌘")]
@@ -82,13 +84,14 @@ struct Shortcut: Codable, Equatable {
         switch action {
         case .history: shortcut
         case .screenshot: screenshotShortcut
+        case .longScreenshot: longScreenshotShortcut
         default: recordingShortcuts[String(action.rawValue)] ?? action.defaultShortcut
         }
     }
     func moduleEnabled(for action: HotKeyAction) -> Bool {
         switch action {
         case .history: clipboardEnabled
-        case .screenshot: screenshotEnabled
+        case .screenshot, .longScreenshot: screenshotEnabled
         default: screenRecordingEnabled
         }
     }
@@ -96,6 +99,7 @@ struct Shortcut: Codable, Equatable {
         switch action {
         case .history: shortcut = value
         case .screenshot: screenshotShortcut = value
+        case .longScreenshot: longScreenshotShortcut = value
         default:
             recordingShortcuts[String(action.rawValue)] = value
             if let data = try? JSONEncoder().encode(recordingShortcuts) { defaults.set(data, forKey: "recordingShortcuts") }
@@ -122,6 +126,13 @@ struct Shortcut: Codable, Equatable {
         didSet {
             if let data = try? JSONEncoder().encode(screenshotShortcut) {
                 defaults.set(data, forKey: "screenshotShortcut")
+            }
+        }
+    }
+    var longScreenshotShortcut: Shortcut {
+        didSet {
+            if let data = try? JSONEncoder().encode(longScreenshotShortcut) {
+                defaults.set(data, forKey: "longScreenshotShortcut")
             }
         }
     }
@@ -160,6 +171,9 @@ struct Shortcut: Codable, Equatable {
         screenshotShortcut =
             defaults.data(forKey: "screenshotShortcut").flatMap { try? JSONDecoder().decode(Shortcut.self, from: $0) }
             ?? .screenshot
+        longScreenshotShortcut =
+            defaults.data(forKey: "longScreenshotShortcut").flatMap { try? JSONDecoder().decode(Shortcut.self, from: $0) }
+            ?? .longScreenshot
         paused = defaults.bool(forKey: "paused")
         hasOnboarded = defaults.bool(forKey: "hasOnboarded")
     }

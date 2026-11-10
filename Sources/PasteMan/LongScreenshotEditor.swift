@@ -3,6 +3,7 @@ import SwiftUI
 import PasteManCore
 
 @MainActor final class LongScreenshotEditor: NSObject, NSWindowDelegate {
+    typealias ZoomMode = ScreenshotPreviewMode
     let document: LongScreenshotDocument
     let state = ScreenshotEditorState()
     let window: NSPanel
@@ -13,8 +14,7 @@ import PasteManCore
     var onClose: (() -> Void)?
     private var header: NSHostingView<LongScreenshotEditorHeader>?
     private var boundsObserver: NSObjectProtocol?
-    private var hoverTip: NSPanel?
-    private var fit = true
+    private let hoverTip = ScreenshotHoverTip()
     private(set) var zoom: CGFloat = 1
     private let notice: String?
 
@@ -32,9 +32,9 @@ import PasteManCore
         window.hidesOnDeactivate = false
         window.acceptsMouseMovedEvents = true
         window.level = .floating
-        window.minSize = CGSize(width: 560, height: 360)
         window.delegate = self
         state.isLongEditor = true; state.tool = .rectangle
+        window.minSize = CGSize(width: state.toolbarWidth + 24, height: 360)
         canvas.state = state
         state.action = { [weak self] in self?.perform($0) }
         state.layoutChanged = { [weak self] in self?.layout() }
@@ -42,7 +42,8 @@ import PasteManCore
         canvas.onAction = { [weak self] in self?.perform($0) }
         canvas.onHistoryChanged = { [weak self] in self?.refresh() }
         scrollView.hasVerticalScroller = true
-        scrollView.hasHorizontalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.scrollerStyle = .legacy
         scrollView.autohidesScrollers = true
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = true
@@ -56,8 +57,7 @@ import PasteManCore
             }
         window.contentView?.addSubview(scrollView)
         let header = NSHostingView(rootView: LongScreenshotEditorHeader(state: state, width: document.image.width,
-            height: document.image.height, notice: notice, onFit: { [weak self] in self?.setZoom(fit: true) },
-            onActual: { [weak self] in self?.setZoom(fit: false) }))
+            height: document.image.height, notice: notice))
         self.header = header
         window.contentView?.addSubview(header)
         layout()
@@ -101,80 +101,43 @@ import PasteManCore
     }
 
     private func closeHoverTip() {
-        if let hoverTip { hoverTip.parent?.removeChildWindow(hoverTip) }
-        hoverTip?.close()
-        hoverTip?.contentView = nil
-        hoverTip = nil
+        hoverTip.hide()
     }
 
-    private func showHoverTip(_ title: String?) {
-        closeHoverTip()
-        guard let title, !title.isEmpty, window.isVisible, let header else { return }
-        let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 11)
-        label.textColor = .labelColor
-        label.sizeToFit()
-        let size = CGSize(width: label.frame.width + 16, height: 26)
-        let screen = window.screen?.visibleFrame ?? window.frame
-        let headerFrame = window.convertToScreen(header.convert(header.bounds, to: nil))
-        let mouse = NSEvent.mouseLocation
-        let below = headerFrame.minY - size.height - 5
-        let above = headerFrame.maxY + 5
-        let y = below >= screen.minY ? below : above
-        let rect = CGRect(
-            x: max(screen.minX + 4, min(mouse.x - size.width / 2, screen.maxX - size.width - 4)),
-            y: min(max(screen.minY + 4, y), screen.maxY - size.height - 4),
-            width: size.width, height: size.height)
-        let tip = NSPanel(contentRect: rect, styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered, defer: false)
-        tip.isReleasedWhenClosed = false
-        tip.level = NSWindow.Level(rawValue: window.level.rawValue + 1)
-        tip.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        tip.ignoresMouseEvents = true
-        tip.hidesOnDeactivate = false
-        tip.isOpaque = false
-        tip.backgroundColor = .clear
-        let background = NSVisualEffectView(frame: CGRect(origin: .zero, size: size))
-        background.material = .popover
-        background.state = .active
-        background.wantsLayer = true
-        background.layer?.cornerRadius = 5
-        background.layer?.masksToBounds = true
-        label.setFrameOrigin(CGPoint(x: 8, y: (size.height - label.frame.height) / 2))
-        background.addSubview(label)
-        tip.contentView = background
-        window.addChildWindow(tip, ordered: .above)
-        tip.orderFrontRegardless()
-        hoverTip = tip
+    private func showHoverTip(_ target: ScreenshotHoverTarget?) {
+        hoverTip.show(target, in: window)
     }
-    func setZoom(fit: Bool) {
+    func setZoom(_ mode: ZoomMode) {
         canvas.commitText()
-        self.fit = fit
+        state.previewMode = mode
         applyZoom()
     }
     private func applyZoom() {
-        let padding: CGFloat = 24
         let old = max(0.001, zoom)
         let origin = scrollView.contentView.bounds.origin
-        let oldCanvasOrigin = canvas.frame.origin
-        // 常驻滚动条出现或隐藏时会改变视口尺寸；按最终视口收敛，保持两侧留白相等。
-        for _ in 0..<4 {
+        // 默认从左上角等比例铺满宽度，只允许纵向滚动条占用视口。
+        // 不为填满高度而放大宽短图，确保整行内容完整可见。
+        for _ in 0..<8 {
             let viewport = scrollView.contentSize
-            zoom = fit ? min(1, max(0.02, (viewport.width - padding * 2) / document.pointSize.width)) : 1
+            let widthScale = viewport.width / document.pointSize.width
+            switch state.previewMode {
+            case .fill, .width: zoom = widthScale
+            case .actual: zoom = 1
+            }
             canvas.zoom = zoom
-            let imageSize = CGSize(width: document.pointSize.width * zoom, height: document.pointSize.height * zoom)
-            let previewSize = CGSize(width: max(viewport.width, imageSize.width + padding * 2),
-                height: max(viewport.height, imageSize.height + padding * 2))
+            var imageSize = CGSize(width: document.pointSize.width * zoom, height: document.pointSize.height * zoom)
+            // 浮点舍入不能为本应恰好铺满的方向额外触发一条滚动条。
+            if abs(imageSize.width - viewport.width) < 0.01 { imageSize.width = viewport.width }
+            if abs(imageSize.height - viewport.height) < 0.01 { imageSize.height = viewport.height }
+            let previewSize = CGSize(width: max(viewport.width, imageSize.width), height: max(viewport.height, imageSize.height))
             previewContainer.setFrameSize(previewSize)
-            canvas.frame = CGRect(x: (previewSize.width - imageSize.width) / 2,
-                y: (previewSize.height - imageSize.height) / 2, width: imageSize.width, height: imageSize.height)
+            canvas.frame = CGRect(origin: .zero, size: imageSize)
             scrollView.tile()
             if scrollView.contentSize == viewport { break }
         }
-        let nextOrigin = CGPoint(x: origin.x <= oldCanvasOrigin.x ? 0
-                : (origin.x - oldCanvasOrigin.x) / old * zoom + canvas.frame.minX,
-            y: origin.y <= oldCanvasOrigin.y ? 0
-                : (origin.y - oldCanvasOrigin.y) / old * zoom + canvas.frame.minY)
+        let viewport = scrollView.contentSize
+        let nextOrigin = CGPoint(x: min(max(0, origin.x / old * zoom), max(0, previewContainer.frame.width - viewport.width)),
+            y: min(max(0, origin.y / old * zoom), max(0, previewContainer.frame.height - viewport.height)))
         scrollView.contentView.scroll(to: nextOrigin)
         scrollView.reflectScrolledClipView(scrollView.contentView)
         canvas.requestVisibleTiles()
@@ -184,9 +147,10 @@ import PasteManCore
         canvas.commitText()
         switch action {
         case .tool(let tool): if tool != .select { state.tool = tool }
+        case .preview(let mode): setZoom(mode)
         case .undo: state.history.undo(); refresh()
         case .redo: state.history.redo(); refresh()
-        case .copy: onOutput?(.copy)
+        case .confirm, .copy: onOutput?(.copy)
         case .save: onOutput?(.save)
         case .pin: onOutput?(.pin)
         case .cancel: onClose?()
@@ -205,16 +169,12 @@ private struct LongScreenshotEditorHeader: View {
     let width: Int
     let height: Int
     let notice: String?
-    let onFit: () -> Void
-    let onActual: () -> Void
     var body: some View {
         VStack(spacing: 4) {
             ScreenshotToolbar(state: state)
             HStack {
                 Text("\(width) × \(height) " + L.t("pixels", "像素")).monospacedDigit()
                 Spacer()
-                Button(L.t("Fit width", "适应宽度"), action: onFit)
-                Button(L.t("Actual size", "原始比例"), action: onActual)
             }.font(.caption).padding(.horizontal, 14).frame(height: 28)
                 .disabled(state.busy)
             if let notice { Text(notice).font(.caption).foregroundStyle(.orange).lineLimit(3).padding(.horizontal, 14).frame(height: 44) }

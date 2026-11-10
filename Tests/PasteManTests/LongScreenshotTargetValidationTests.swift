@@ -48,11 +48,40 @@ import Testing
         snapshot = valid; snapshot.hitProcessID = 321
         #expect(throws: LongScreenshotTargetError.windowObscured) { try check(snapshot) }
     }
-    @Test func missingAccessibilityResponseIsNotReportedAsLostPermission() throws {
+    @Test func missingHitResponseUsesIndependentlyVerifiedWindowIdentity() throws {
+        var snapshot = valid
+        snapshot.hitProcessID = nil
+        snapshot.hitWindowFrame = nil
+        try check(snapshot)
+        snapshot.focusedWindowFrame = nil
+        try check(snapshot)
+
+        snapshot.hasPermission = false
+        #expect(throws: LongScreenshotTargetError.permissionLost) { try check(snapshot) }
+        snapshot = valid; snapshot.hitProcessID = nil; snapshot.targetWindow = nil
+        #expect(throws: LongScreenshotTargetError.windowUnavailable) { try check(snapshot) }
+        snapshot = valid; snapshot.hitProcessID = nil
+        snapshot.targetWindow = LongScreenshotWindowIdentity(id: 18, processID: target.processID, frame: target.frame)
+        #expect(throws: LongScreenshotTargetError.windowUnavailable) { try check(snapshot) }
+        snapshot = valid; snapshot.hitProcessID = nil
+        snapshot.targetWindow = LongScreenshotWindowIdentity(id: target.windowID, processID: target.processID,
+            frame: target.frame.offsetBy(dx: 2, dy: 0))
+        #expect(throws: LongScreenshotTargetError.windowMoved) { try check(snapshot) }
+        snapshot = valid; snapshot.hitProcessID = nil
+        snapshot.topWindow = LongScreenshotWindowIdentity(id: 18, processID: 321, frame: target.frame)
+        #expect(throws: LongScreenshotTargetError.windowObscured) { try check(snapshot) }
+        snapshot = valid; snapshot.hitProcessID = nil; snapshot.frontmostProcessID = 321
+        #expect(throws: LongScreenshotTargetError.applicationChanged) { try check(snapshot) }
+        snapshot = valid; snapshot.hitProcessID = nil; snapshot.frontmostProcessID = ownPID
+        #expect(throws: LongScreenshotTargetError.ownApplicationFocused) { try check(snapshot) }
+        snapshot = valid; snapshot.hitProcessID = nil
+        snapshot.focusedWindowFrame = target.frame.offsetBy(dx: 2, dy: 0)
+        #expect(throws: LongScreenshotTargetError.windowChanged) { try check(snapshot) }
+    }
+
+    @Test func missingFocusIdentityStillStopsAndKnownWindowMetadataIsChecked() throws {
         var snapshot = valid; snapshot.frontmostProcessID = nil
         #expect(throws: LongScreenshotTargetError.focusUnavailable) { try check(snapshot) }
-        snapshot = valid; snapshot.hitProcessID = nil
-        #expect(throws: LongScreenshotTargetError.hitTestUnavailable) { try check(snapshot) }
         snapshot = valid; snapshot.hitWindowFrame = target.frame.offsetBy(dx: 2, dy: 0)
         #expect(throws: LongScreenshotTargetError.windowChanged) { try check(snapshot) }
         snapshot = valid
@@ -83,6 +112,18 @@ import Testing
         } handoff: { handoffs += 1 }
         #expect(attempts == 5 && handoffs == 0)
     }
+    @Test @MainActor func unavailableHitMetadataDoesNotBlockAStableVerifiedWindow() async throws {
+        var attempts = 0
+        try await LongScreenshotTargetReadiness.wait(timeout: .seconds(5), interval: .milliseconds(1)) {
+            attempts += 1
+            var snapshot = valid
+            snapshot.hitProcessID = nil
+            snapshot.hitWindowFrame = nil
+            snapshot.focusedWindowFrame = nil
+            try check(snapshot)
+        }
+        #expect(attempts == 2)
+    }
     @Test @MainActor func ownFocusIsHandedBackOnceAndEveryStableCheckMustBeConsecutive() async throws {
         var attempts = 0
         var handoffs = 0
@@ -109,6 +150,101 @@ import Testing
         } catch let error as LongScreenshotTargetError { #expect(error == .applicationChanged) }
         #expect(attempts == 1 && handoffs == 0)
     }
+
+    @Test(arguments: [pid_t(321), pid_t(900)]) @MainActor
+    func initiallyVisibleWindowReceivesFocusOnceBeforeTwoStableChecks(_ initialPID: pid_t) async throws {
+        var attempts = 0, handoffs = 0
+        try await LongScreenshotTargetReadiness.prepare(target: target, region: region, ownProcessID: ownPID,
+            timeout: .seconds(5), interval: .milliseconds(1)) {
+            attempts += 1
+            var snapshot = valid
+            if attempts <= 3 { snapshot.frontmostProcessID = initialPID }
+            return snapshot
+        } handoff: { handoffs += 1 }
+        #expect(attempts == 5 && handoffs == 1)
+    }
+
+    @Test @MainActor func alreadyFocusedTargetNeedsNoActivation() async throws {
+        var attempts = 0, handoffs = 0
+        try await LongScreenshotTargetReadiness.prepare(target: target, region: region, ownProcessID: ownPID,
+            timeout: .seconds(5), interval: .milliseconds(1)) {
+            attempts += 1
+            return valid
+        } handoff: { handoffs += 1 }
+        #expect(attempts == 2 && handoffs == 0)
+    }
+
+    @Test @MainActor func staleOverlayDoesNotPreventInitialFocusHandoff() async throws {
+        var attempts = 0, handoffs = 0
+        try await LongScreenshotTargetReadiness.prepare(target: target, region: region, ownProcessID: ownPID,
+            timeout: .seconds(5), interval: .milliseconds(1)) {
+            attempts += 1
+            var snapshot = valid
+            snapshot.frontmostProcessID = handoffs == 0 ? ownPID : target.processID
+            if attempts <= 2 { snapshot.hitProcessID = ownPID }
+            return snapshot
+        } handoff: { handoffs += 1 }
+        #expect(attempts == 4 && handoffs == 1)
+    }
+
+    @Test(arguments: [false, true]) @MainActor
+    func initialHandoffRejectsAUserSwitchAndDoesNotActivateAgain(_ targetWasReached: Bool) async throws {
+        var attempts = 0, handoffs = 0
+        do {
+            try await LongScreenshotTargetReadiness.prepare(target: target, region: region, ownProcessID: ownPID,
+                timeout: .seconds(5), interval: .milliseconds(1)) {
+                attempts += 1
+                var snapshot = valid
+                if attempts == 1 { snapshot.frontmostProcessID = 321 }
+                else if !targetWasReached { snapshot.frontmostProcessID = 456 }
+                else if attempts > 2 { snapshot.frontmostProcessID = 321 }
+                return snapshot
+            } handoff: { handoffs += 1 }
+            Issue.record("准备期间真实切换应用时不能继续")
+        } catch let issue as LongScreenshotTargetError { #expect(issue == .applicationChanged) }
+        #expect(attempts == (targetWasReached ? 3 : 2) && handoffs == 1)
+    }
+
+    @Test @MainActor func invalidInitialWindowIsNeverActivated() async throws {
+        for issue in [LongScreenshotTargetError.permissionLost, .windowUnavailable, .windowMoved,
+                      .windowObscured, .windowChanged] {
+            var snapshot = valid
+            snapshot.frontmostProcessID = 321
+            switch issue {
+            case .permissionLost: snapshot.hasPermission = false
+            case .windowUnavailable: snapshot.targetWindow = nil
+            case .windowMoved:
+                snapshot.targetWindow = LongScreenshotWindowIdentity(id: target.windowID, processID: target.processID,
+                    frame: target.frame.offsetBy(dx: 2, dy: 0))
+            case .windowObscured: snapshot.hitProcessID = 456
+            case .windowChanged: snapshot.hitWindowFrame = target.frame.offsetBy(dx: 2, dy: 0)
+            default: break
+            }
+            var handoffs = 0
+            do {
+                try await LongScreenshotTargetReadiness.prepare(target: target, region: region, ownProcessID: ownPID) {
+                    snapshot
+                } handoff: { handoffs += 1 }
+                Issue.record("无效窗口不能开始采集")
+            } catch let actual as LongScreenshotTargetError { #expect(actual == issue) }
+            #expect(handoffs == 0)
+        }
+    }
+
+    @Test @MainActor func incompleteHandoffTimesOutWithoutAcceptingTheOldForeground() async throws {
+        var handoffs = 0
+        do {
+            try await LongScreenshotTargetReadiness.prepare(target: target, region: region, ownProcessID: ownPID,
+                timeout: .milliseconds(5), interval: .milliseconds(1)) {
+                var snapshot = valid
+                snapshot.frontmostProcessID = 321
+                return snapshot
+            } handoff: { handoffs += 1 }
+            Issue.record("目标始终未获得焦点时不能完成准备")
+        } catch let issue as LongScreenshotTargetError { #expect(issue == .focusUnavailable) }
+        #expect(handoffs == 1)
+    }
+
     @Test @MainActor func startupTimeoutPreservesItsActualCauseAndCancellationStopsPolling() async throws {
         do {
             try await LongScreenshotTargetReadiness.wait(timeout: .milliseconds(5), interval: .milliseconds(1)) {
@@ -131,7 +267,7 @@ import Testing
 
     @Test func startupErrorsNeverClaimAnImageWasSaved() {
         for error in [LongScreenshotTargetError.permissionLost, .windowUnavailable, .windowMoved, .windowObscured,
-                      .applicationChanged, .windowChanged, .focusUnavailable, .ownApplicationFocused, .hitTestUnavailable, .overlayClosing] {
+                      .applicationChanged, .windowChanged, .focusUnavailable, .ownApplicationFocused, .overlayClosing] {
             #expect(!error.localizedDescription.contains("已保留"))
             #expect(!error.localizedDescription.contains("kept"))
         }

@@ -11,23 +11,50 @@ import SwiftUI
     var optionsExpanded = false
     var shapesExpanded = false
     var layoutChanged: (() -> Void)?
-    var hoverChanged: ((String?) -> Void)?
+    var hoverChanged: ((ScreenshotHoverTarget?) -> Void)?
     var toolbarHeight: CGFloat {
         46 + (optionsExpanded ? 36 : 0) + (shapesExpanded ? 36 : 0) + (busy ? 36 : 0) + (error == nil ? 0 : 68)
-            + (prefersLongScreenshot && !isLongEditor ? 48 : 0)
     }
     var busy = false
     var error: String?
     var isLongEditor = false
     var prefersLongScreenshot = false
-    var toolbarWidth: CGFloat { ScreenshotToolbar.width + (isLongEditor ? 0 : 36) }
+    var confirmsLongScreenshot: Bool { prefersLongScreenshot && !isLongEditor }
+    var previewMode = ScreenshotPreviewMode.fill
+    var toolbarWidth: CGFloat { ScreenshotToolbar.width + (isLongEditor ? 124 : 36) }
     var canAdjust: Bool { history.annotations.isEmpty && history.undone.isEmpty }
     var action: ((ScreenshotEditorAction) -> Void)?
 }
 
 enum ScreenshotEditorAction {
     case tool(AnnotationTool)
-    case undo, redo, reselect, longScreenshot, copy, save, pin, cancel
+    case preview(ScreenshotPreviewMode)
+    case undo, redo, reselect, longScreenshot, confirm, copy, save, pin, cancel
+}
+
+enum ScreenshotPreviewMode: String, CaseIterable {
+    case fill, width, actual
+    var title: String {
+        switch self {
+        case .fill: L.t("Fill window", "铺满窗口")
+        case .width: L.t("Fit width", "适应宽度")
+        case .actual: L.t("Actual size", "原始比例")
+        }
+    }
+    var detail: String {
+        switch self {
+        case .fill: L.t("Fill the window width proportionally; scroll vertically for the rest.", "按窗口宽度等比例铺满，超出高度的部分垂直滚动查看。")
+        case .width: L.t("Show the full image width inside the window.", "让整行图片完整显示在窗口内。")
+        case .actual: L.t("View at the original scale without changing the exported image.", "按截图原始比例查看，不改变导出图片尺寸。")
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .fill: "arrow.up.left.and.arrow.down.right"
+        case .width: "arrow.left.and.right"
+        case .actual: "1.magnifyingglass"
+        }
+    }
 }
 
 struct ScreenshotToolbar: View {
@@ -58,12 +85,23 @@ struct ScreenshotToolbar: View {
                         ? L.t("Start scrolling screenshot", "开始长截屏")
                         : L.t("Reselect before starting a scrolling screenshot", "已有标注，请先重新框选再长截屏"),
                         action: .longScreenshot, enabled: state.canAdjust)
+                } else {
+                    separator
+                    ForEach(ScreenshotPreviewMode.allCases, id: \.self) { mode in
+                        action(mode.symbol, title: mode.title, action: .preview(mode), detail: mode.detail,
+                            selected: state.previewMode == mode)
+                            .accessibilityIdentifier("screenshot.preview." + mode.rawValue)
+                    }
                 }
                 separator
                 action("square.and.arrow.down", title: L.t("Save PNG…", "保存 PNG…"), action: .save)
                 action("pin", title: L.t("Pin to desktop", "钉在桌面"), action: .pin)
                 action("xmark", title: L.t("Cancel Esc", "取消 Esc"), action: .cancel, color: .red)
-                action("checkmark", title: L.t("Finish and copy ⌘C", "完成并复制 ⌘C"), action: .copy, color: Self.tint)
+                action("checkmark", title: state.confirmsLongScreenshot
+                    ? (state.canAdjust ? L.t("Start scrolling screenshot", "开始长截屏")
+                        : L.t("Reselect before starting a scrolling screenshot", "已有标注，请先重新框选再长截屏"))
+                    : L.t("Finish and copy ⌘C", "完成并复制 ⌘C"), action: .confirm, color: Self.tint,
+                    enabled: !state.confirmsLongScreenshot || state.canAdjust)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .frame(height: 46)
@@ -117,11 +155,6 @@ struct ScreenshotToolbar: View {
                 }.frame(height: 36).padding(.horizontal, 16)
             }
             if state.busy { ProgressView().controlSize(.small).padding(8) }
-            if state.prefersLongScreenshot && !state.isLongEditor {
-                Button(L.t("Start scrolling screenshot", "开始长截屏")) { state.action?(.longScreenshot) }
-                    .buttonStyle(.borderedProminent).tint(Self.tint)
-                    .disabled(!state.canAdjust).padding(8)
-            }
             if let error = state.error { Text(error).font(.caption).foregroundStyle(.orange).lineLimit(3).padding(10) }
         }
         .font(.system(size: 17, weight: .regular))
@@ -149,15 +182,17 @@ struct ScreenshotToolbar: View {
         }.modifier(ScreenshotHoverFeedback(title: tool.title, state: state))
     }
     private func action(_ symbol: String, title: String, action: ScreenshotEditorAction, color: Color? = nil,
-                        enabled: Bool = true)
+                        enabled: Bool = true, detail: String? = nil, selected: Bool = false)
         -> some View
     {
         Button {
             state.action?(action)
         } label: {
-            Image(systemName: symbol).frame(width: 32, height: 32).foregroundStyle(color ?? Color.primary.opacity(0.7))
+            Image(systemName: symbol).frame(width: 32, height: 32)
+                .foregroundStyle(color ?? (selected ? Self.tint : Color.primary.opacity(0.7)))
+                .background(selected ? Self.tint.opacity(0.1) : .clear, in: RoundedRectangle(cornerRadius: 5))
         }.disabled(!enabled)
-            .modifier(ScreenshotHoverFeedback(title: title, state: state, buttonEnabled: enabled))
+            .modifier(ScreenshotHoverFeedback(title: title, state: state, buttonEnabled: enabled, detail: detail))
     }
 }
 
@@ -165,7 +200,9 @@ private struct ScreenshotHoverFeedback: ViewModifier {
     let title: String
     let state: ScreenshotEditorState
     var buttonEnabled = true
+    var detail: String?
     @ViewState private var hovering = false
+    @ViewState private var anchor = ScreenshotHoverReference()
     @Environment(\.isEnabled) private var enabled
 
     func body(content: Content) -> some View {
@@ -177,11 +214,14 @@ private struct ScreenshotHoverFeedback: ViewModifier {
             )
             .onHover { inside in
                 hovering = inside
-                state.hoverChanged?(inside ? title : nil)
+                if inside { anchor.view?.beginHover() }
+                else { anchor.view?.endHover() }
             }
-            .onDisappear { if hovering { state.hoverChanged?(nil) } }
-            .help(title)
+            .background(ScreenshotHoverAnchor(title: title, detail: detail, reference: anchor) { [weak state] target in
+                state?.hoverChanged?(target)
+            })
             .accessibilityLabel(title)
+            .accessibilityHint(detail ?? "")
     }
 }
 
@@ -193,7 +233,7 @@ private struct ScreenshotHoverFeedback: ViewModifier {
     private(set) var selectedImage: CGImage?
     private var preview: CGImage?
     private var toolbar: NSHostingView<ScreenshotToolbar>?
-    private var hoverTip: NSPanel?
+    private let hoverTip = ScreenshotHoverTip()
     private var textEditor: NSTextView?
     private var textPosition: CGPoint = .zero
     private var textStyle: (AnnotationColor, CGFloat)?
@@ -518,46 +558,9 @@ private struct ScreenshotHoverFeedback: ViewModifier {
         toolbar.frame = CGRect(x: x, y: y, width: width, height: height)
         toolbar.isHidden = false
     }
-    private func showHoverTip(_ title: String?) {
-        if let hoverTip { hoverTip.parent?.removeChildWindow(hoverTip) }
-        hoverTip?.close()
-        hoverTip?.contentView = nil
-        hoverTip = nil
-        guard let title, let window, window.isVisible, let toolbar, !toolbar.isHidden else { return }
-        let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 11)
-        label.textColor = .labelColor
-        label.sizeToFit()
-        let size = CGSize(width: label.frame.width + 16, height: 26)
-        let mouse = NSEvent.mouseLocation
-        let screen = window.screen?.visibleFrame ?? window.frame
-        let bar = window.convertToScreen(convert(toolbar.frame, to: nil))
-        let y = bar.minY - size.height - 5 >= screen.minY ? bar.minY - size.height - 5 : bar.maxY + 5
-        let rect = CGRect(
-            x: max(screen.minX + 4, min(mouse.x - size.width / 2, screen.maxX - size.width - 4)),
-            y: min(max(screen.minY + 4, y), screen.maxY - size.height - 4),
-            width: size.width, height: size.height)
-        let tip = NSPanel(
-            contentRect: rect, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        tip.isReleasedWhenClosed = false
-        tip.level = NSWindow.Level(rawValue: window.level.rawValue + 1)
-        tip.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        tip.ignoresMouseEvents = true
-        tip.hidesOnDeactivate = false
-        tip.isOpaque = false
-        tip.backgroundColor = .clear
-        let background = NSVisualEffectView(frame: CGRect(origin: .zero, size: size))
-        background.material = .popover
-        background.state = .active
-        background.wantsLayer = true
-        background.layer?.cornerRadius = 5
-        background.layer?.masksToBounds = true
-        label.setFrameOrigin(CGPoint(x: 8, y: (size.height - label.frame.height) / 2))
-        background.addSubview(label)
-        tip.contentView = background
-        window.addChildWindow(tip, ordered: .above)
-        tip.orderFrontRegardless()
-        hoverTip = tip
+    private func showHoverTip(_ target: ScreenshotHoverTarget?) {
+        guard let window, let toolbar, !toolbar.isHidden else { hoverTip.hide(); return }
+        hoverTip.show(target, in: window)
     }
     private func beginText(at point: CGPoint) {
         let editor = NSTextView(
@@ -625,6 +628,7 @@ private struct ScreenshotHoverFeedback: ViewModifier {
         commitText()
         switch action {
         case .tool(let tool): state.tool = tool
+        case .preview: break
         case .undo:
             state.history.undo()
             updatePreview()
@@ -633,6 +637,9 @@ private struct ScreenshotHoverFeedback: ViewModifier {
             updatePreview()
         case .reselect: coordinator?.reselect()
         case .longScreenshot: coordinator?.startLongScreenshot(from: self)
+        case .confirm:
+            if state.confirmsLongScreenshot { coordinator?.startLongScreenshot(from: self) }
+            else { coordinator?.finish(.copy, from: self) }
         case .copy: coordinator?.finish(.copy, from: self)
         case .save: coordinator?.finish(.save, from: self)
         case .pin: coordinator?.finish(.pin, from: self)

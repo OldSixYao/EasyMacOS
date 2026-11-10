@@ -144,6 +144,14 @@ import Testing
         try await snapshot(
             ScreenshotToolbar(state: editorState), size: NSSize(width: 492, height: 92),
             appearance: .darkAqua, to: output.appendingPathComponent("screenshot-toolbar-options-dark.png"))
+        editorState.optionsExpanded = false
+        editorState.prefersLongScreenshot = true
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            let mode = appearance == .aqua ? "light" : "dark"
+            try await snapshot(
+                ScreenshotToolbar(state: editorState), size: NSSize(width: editorState.toolbarWidth, height: 46),
+                appearance: appearance, to: output.appendingPathComponent("long-selection-toolbar-\(mode).png"))
+        }
         let screen = ScreenshotScreen(id: 1, frame: CGRect(x: 0, y: 0, width: 800, height: 600), scale: 1)
         let capture = CapturedScreen(
             screen: screen, image: try #require(sample.cgImage(forProposedRect: nil, context: nil, hints: nil)))
