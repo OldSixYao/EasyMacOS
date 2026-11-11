@@ -119,6 +119,18 @@ codesign -d -r- dist/EasyMacOS.app
 
 The build script selects SwiftPM's native build engine because the current CLT 27 default engine can emit dynamic package frameworks unsuitable for copying a lone executable. Native SwiftPM statically links the core target. The script also uses the existing `SwiftUI.State` property wrapper through an explicit type alias, avoiding the CLT 27 SDK's missing SwiftUI state macro plugin. `scripts/test.sh` loads the installed TestingMacros plugin explicitly when available. Tests use Swift Testing; with older toolchains where this is not bundled in CLT, select full Xcode.
 
+默认测试显式传入 `--no-parallel`：原生窗口、快捷键与主线程计时共用进程状态，避免跨测试组并行导致相互干扰或等待超时。独立纯逻辑专项可用 `--parallel --filter ...` 主动开启并行；不改变测试断言或生产代码的超时期限。
+
+### 故障恢复验证
+
+截图保存任务覆盖图片准备、数据库打开和写锁等待；暂停、关闭记录、清空历史或会话锁定后，尚未提交的保存会取消。历史清理遇到存储故障时按一至六十秒递增间隔重试，恢复后继续清理过期记录；停用剪贴板或会话暂停会取消重试。访达剪切状态损坏时，重新剪切会重建状态，独立命令编号保持递增。
+
+以下回归使用独立偏好、临时数据库、命名剪贴板及合成图片，不读取真实历史、控制访达或采集屏幕：
+
+```sh
+./scripts/test.sh --filter 'ClipboardLifecycleTests|QueryCancellationTests|ScreenRecordingTests|FinderCutClipboardTests|FinderMoveTests'
+```
+
 ## Screenshots and pinned images
 
 Press **⌃⌥A** or choose **Screenshot** from the menu bar's right-click menu. Both screenshot and history shortcuts can be customized independently in Settings. Conflicting registrations keep the previous shortcut.

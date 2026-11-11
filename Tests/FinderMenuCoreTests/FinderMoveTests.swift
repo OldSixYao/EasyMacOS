@@ -96,4 +96,37 @@ import Testing
         try store.save(FinderCutState(token: UUID(), changeCount: 1, fileCount: 0))
         #expect(throws: FinderMoveError.expiredCut) { try store.load() }
     }
+
+    @Test func cutCommandReservationSurvivesMissingStateAndMigratesLegacyCounters() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = FinderCutStateStore(url: root.appendingPathComponent("cut.json"))
+        let legacy = FinderCutState(token: UUID(), changeCount: 10, fileCount: 1, commandID: 80)
+        try store.save(legacy)
+        let first = try store.reserveCommandID(pasteboardChangeCount: 10)
+        #expect(first == 81)
+        // 即使新状态写入失败或丢失，已经预留的编号也不能重新使用。
+        try FileManager.default.removeItem(at: store.url)
+        let restarted = FinderCutStateStore(url: store.url)
+        let second = try restarted.reserveCommandID(pasteboardChangeCount: 2)
+        #expect(second == 82)
+        try store.save(FinderCutState(token: UUID(), changeCount: 3, fileCount: 0, commandID: second))
+        #expect(try store.reserveCommandID(pasteboardChangeCount: 3) == 83)
+    }
+
+    @Test func cutRecoveryWithoutSequenceAdvancesPastCurrentClipboardAndPreservesReadErrors() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = FinderCutStateStore(url: root.appendingPathComponent("cut.json"))
+        try Data("损坏的旧版状态".utf8).write(to: store.url)
+        #expect(try store.reserveCommandID(pasteboardChangeCount: 200) == 201)
+        let blocked = root.appendingPathComponent("不是文件")
+        try FileManager.default.createDirectory(at: blocked, withIntermediateDirectories: true)
+        let unreadable = FinderCutStateStore(url: blocked)
+        #expect(throws: (any Error).self) { try unreadable.reserveCommandID(pasteboardChangeCount: 201) }
+        #expect(FileManager.default.fileExists(atPath: blocked.path))
+        try store.save(FinderCutState(token: UUID(), changeCount: 202, fileCount: 1, commandID: FinderCutState.maximumCommandID))
+        #expect(throws: FinderMoveError.expiredCut) { try store.reserveCommandID(pasteboardChangeCount: 202) }
+    }
 }

@@ -16,7 +16,9 @@ import PasteManCore
     private var monitoringEnabled: Bool
     private var task: Task<Void, Never>?
     private var cleanupTask: Task<Void, Never>?
+    private var cleanupRevision = 0
     private var processingTask: Task<Void, Never>?
+    private var screenshotTasks: [UUID: Task<Void, Error>] = [:]
     private struct Capture {
         let snapshot: ClipboardSnapshot
         let sourceID: String
@@ -100,7 +102,11 @@ import PasteManCore
     }
     func resetBaseline(invalidateScreenshots: Bool = true) {
         generation += 1
-        if invalidateScreenshots { screenshotGeneration += 1 }
+        if invalidateScreenshots {
+            screenshotGeneration += 1
+            for task in screenshotTasks.values { task.cancel() }
+            screenshotTasks.removeAll()
+        }
         gate.reset(to: clipboard.changeCount)
         pending.removeAll()
         queuedBytes = 0
@@ -126,27 +132,41 @@ import PasteManCore
         return screenshotGeneration
     }
     func recordScreenshot(_ png: Data, sourceID: String, sourceName: String, ticket: Int) async throws {
-        guard screenshotTicket(sourceID: sourceID) == ticket else { return }
-        let content = try await prepareImage(png)
-        permissions.refreshClipboard()
-        guard settings.clipboardEnabled, sessionActive, ticket == screenshotGeneration, settings.hasOnboarded, !settings.paused, permissions.allowsMonitoring,
-            !settings.excludedApps.contains(sourceID)
-        else { return }
-        try await repository.save(
-            content, sourceBundleID: sourceID, sourceName: sourceName,
-            policy: settings.policy, now: Date())
-        onCaptureSucceeded?()
-        onChange?()
+        try await recordScreenshot(sourceID: sourceID, sourceName: sourceName, ticket: ticket) { [prepareImage] in
+            try await prepareImage(png)
+        }
     }
 
     func recordScreenshot(_ image: ScreenshotImage, sourceID: String, sourceName: String, ticket: Int) async throws {
+        try await recordScreenshot(sourceID: sourceID, sourceName: sourceName, ticket: ticket) {
+            try await ScreenshotRenderWorker.shared.prepareHistory(image)
+        }
+    }
+
+    private func recordScreenshot(sourceID: String, sourceName: String, ticket: Int,
+                                  prepare: @escaping @Sendable () async throws -> PreparedContent) async throws {
         guard screenshotTicket(sourceID: sourceID) == ticket else { return }
-        let content = try await ScreenshotRenderWorker.shared.prepareHistory(image)
-        guard screenshotTicket(sourceID: sourceID) == ticket else { return }
-        try await repository.save(content, sourceBundleID: sourceID, sourceName: sourceName,
-            policy: settings.policy, now: Date())
-        onCaptureSucceeded?()
-        onChange?()
+        let id = UUID()
+        // 取消覆盖图片处理及数据库打开、排队阶段，不能只在入库前检查一次票据。
+        let task = Task {
+            try Task.checkCancellation()
+            let content = try await prepare()
+            guard !Task.isCancelled, screenshotTicket(sourceID: sourceID) == ticket else { return }
+            try await repository.save(content, sourceBundleID: sourceID, sourceName: sourceName,
+                policy: settings.policy, now: Date())
+            guard !Task.isCancelled, screenshotTicket(sourceID: sourceID) == ticket else { return }
+            onCaptureSucceeded?()
+            onChange?()
+        }
+        screenshotTasks[id] = task
+        defer { screenshotTasks[id] = nil }
+        do {
+            try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: { task.cancel() }
+        } catch is CancellationError {
+            // 暂停、关闭或清空使旧截图失效，不作为保存失败提示。
+        }
     }
 
     func poll() async {
@@ -246,32 +266,35 @@ import PasteManCore
     func scheduleCleanup() {
         cleanupTask?.cancel()
         cleanupTask = nil
+        cleanupRevision += 1
+        let revision = cleanupRevision
         guard settings.clipboardEnabled, running, sessionActive else { return }
         cleanupTask = Task { [weak self] in
+            defer { if self?.cleanupRevision == revision { self?.cleanupTask = nil } }
+            var retrying = false
+            var retryDelay: Double = 1
             // 启动或重新开启后先恢复保留策略，随后按实际过期时间调度。
-            do {
-                try Task.checkCancellation()
-                guard let repository = self?.repository, let policy = self?.settings.policy,
-                      self?.settings.clipboardEnabled == true else { return }
-                if try await repository.pruneIfNeeded(policy: policy, now: Date()), !Task.isCancelled {
-                    self?.onChange?()
-                }
-            } catch is CancellationError { return } catch {
-                if !Task.isCancelled, self?.settings.clipboardEnabled == true { self?.onError?(error) }
-                return
-            }
             while !Task.isCancelled {
-                guard let repository = self?.repository, let policy = self?.settings.policy else { return }
+                guard let repository = self?.repository else { return }
                 do {
-                    let date = try await repository.nextCleanup(policy: policy, now: Date())
-                    try await Task.sleep(for: .seconds(max(1, date.timeIntervalSinceNow)), tolerance: .seconds(1))
+                    if retrying {
+                        try await Task.sleep(for: .seconds(retryDelay))
+                        retryDelay = min(60, retryDelay * 2)
+                        try await repository.retry()
+                    }
                     try Task.checkCancellation()
-                    guard let self, self.settings.clipboardEnabled else { return }
-                    let policy = self.settings.policy
-                    if try await repository.pruneIfNeeded(policy: policy, now: Date()) { self.onChange?() }
+                    guard let policy = self?.settings.policy, self?.settings.clipboardEnabled == true,
+                          self?.running == true, self?.sessionActive == true else { return }
+                    if try await repository.pruneIfNeeded(policy: policy, now: Date()), !Task.isCancelled {
+                        self?.onChange?()
+                    }
+                    let date = try await repository.nextCleanup(policy: policy, now: Date())
+                    retrying = false
+                    retryDelay = 1
+                    try await Task.sleep(for: .seconds(max(1, date.timeIntervalSinceNow)), tolerance: .seconds(1))
                 } catch is CancellationError { return } catch {
                     if !Task.isCancelled, self?.settings.clipboardEnabled == true { self?.onError?(error) }
-                    return
+                    retrying = true
                 }
             }
         }

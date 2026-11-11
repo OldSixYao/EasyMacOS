@@ -38,6 +38,16 @@ import Testing
     }
 }
 
+/// 复现系统枚举尚未建立录制流便失败的状态；停止沿用实际系统引擎。
+@MainActor private final class EarlyFailureRecordingEngine: ScreenRecordingEngine {
+    var onFailure: ((Error) -> Void)?
+    private let system = SystemScreenRecordingEngine()
+    func start(target: ScreenRecordingTarget, options: ScreenRecordingOptions, url: URL) async throws {
+        throw ScreenRecordingError.unavailable
+    }
+    func stop() async throws { try await system.stop() }
+}
+
 private actor RecordingTestExporter: ScreenRecordingExporting {
     var shouldFail = false
     var calls: [[URL]] = []
@@ -98,6 +108,43 @@ private actor RecordingTestExporter: ScreenRecordingExporting {
 }
 
 @Suite("录屏状态与配置", .serialized) @MainActor struct ScreenRecordingTests {
+    @Test func earlyStartupFailureReleasesSessionAndAllowsAnotherRecording() async throws {
+        let f = try RecordingFixture(); defer { f.clean() }
+        var failFirst = true
+        let coordinator = ScreenRecordingCoordinator(makeEngine: {
+            if failFirst { failFirst = false; return EarlyFailureRecordingEngine() }
+            return f.pool.make()
+        }, exporter: f.exporter, defaults: f.defaults, countdownInterval: .milliseconds(1))
+        coordinator.select(mode: .region, options: f.options)
+        coordinator.confirm(f.target)
+        await wait { coordinator.phase == .failed }
+        try #require(coordinator.phase == .failed)
+        #expect(coordinator.errorMessage == ScreenRecordingError.unavailable.localizedDescription)
+        #expect(coordinator.pendingRecoveries.isEmpty && coordinator.sessionDirectory == nil)
+        coordinator.keepForRecovery()
+        #expect(!coordinator.isActive)
+        coordinator.select(mode: .region, options: f.options)
+        coordinator.confirm(f.target)
+        await wait { coordinator.phase == .recording }
+        coordinator.stop()
+        await wait { coordinator.phase == .idle }
+        #expect(coordinator.savedURL != nil)
+    }
+
+    @Test func stoppingAnUnstartedSystemEngineCompletesRepeatedly() async throws {
+        let engine = SystemScreenRecordingEngine()
+        var completed = false
+        let task = Task {
+            try await engine.stop()
+            try await engine.stop()
+            completed = true
+        }
+        defer { task.cancel() }
+        await wait { completed }
+        try #require(completed)
+        try await task.value
+    }
+
     @Test func coordinatesRespectNegativeDisplaysScalingClippingAndEvenSize() throws {
         let frame = CGRect(x: -1600, y: -240, width: 1600, height: 1200)
         let region = try #require(ScreenRecordingTarget.region(displayID: 22, frame: frame, scale: 2,

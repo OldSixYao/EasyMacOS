@@ -82,4 +82,23 @@ import Testing
         try valid.store.save(mismatched)
         #expect(throws: FinderMoveError.expiredCut) { try valid.current(token: state.token) }
     }
+
+    @Test(arguments: [Data("{broken".utf8), Data("{\"token\":false}".utf8)])
+    func newCutRecoversDamagedStateWithoutReusingAnOldMenuCommand(_ damaged: Data) throws {
+        let root = try folder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("保留文件.txt")
+        try Data("原始内容".utf8).write(to: file)
+        let board = NSPasteboard.withUniqueName()
+        defer { board.releaseGlobally() }
+        let store = FinderCutStateStore(url: root.appendingPathComponent("state.json"))
+        let clipboard = FinderCutClipboard(board: board, store: store)
+        let old = try clipboard.cut([file])
+        try damaged.write(to: store.url)
+        let recovered = try FinderCutClipboard(board: board, store: store).cut([file])
+        #expect(recovered.commandID > old.commandID && recovered.token != old.token)
+        #expect(recovered.availableToken(changeCount: board.changeCount, commandID: old.commandID) == nil)
+        #expect(try clipboard.current(token: recovered.token).1 == [file])
+        #expect(try String(contentsOf: file, encoding: .utf8) == "原始内容")
+    }
 }

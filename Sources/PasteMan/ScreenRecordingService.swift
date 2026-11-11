@@ -135,11 +135,12 @@ enum ScreenRecordingError: LocalizedError {
         recordingConfig.videoCodecType = .h264
         recordingConfig.outputFileType = .mp4
         let output = SCRecordingOutput(configuration: recordingConfig, delegate: self)
-        self.output = output
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
-        self.stream = stream
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
         try stream.addRecordingOutput(output)
+        // 配置完整后才交给停止流程；配置失败同样没有可等待的录制回调。
+        self.output = output
+        self.stream = stream
         do {
             try await withCheckedThrowingContinuation { continuation in
                 startWaiter = continuation
@@ -159,10 +160,13 @@ enum ScreenRecordingError: LocalizedError {
     func stop() async throws {
         stopping = true
         defer { stream = nil; output = nil }
-        if let stream {
-            do { try await stream.stopCapture() }
-            catch { complete(.failure(error)) }
+        // 枚举显示器等早期步骤失败时尚无录制流，不会收到录制结束回调。
+        guard let stream else {
+            if let finishResult { try finishResult.get() }
+            return
         }
+        do { try await stream.stopCapture() }
+        catch { complete(.failure(error)) }
         if let finishResult { try finishResult.get() }
         else {
             try await withCheckedThrowingContinuation { finishWaiter = $0 }

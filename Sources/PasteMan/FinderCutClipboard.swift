@@ -13,8 +13,7 @@ import FinderMenuCore
 
     @discardableResult func cut(_ sources: [URL], validateFiles: Bool = true) throws -> FinderCutState {
         let sources = validateFiles ? try FinderMoveValidation.sources(sources) : sources
-        let previousID = try store.load()?.commandID ?? 0
-        guard previousID < FinderCutState.maximumCommandID else { throw FinderMoveError.expiredCut }
+        let commandID = try store.reserveCommandID(pasteboardChangeCount: board.changeCount)
         let token = UUID()
         let items = sources.map { url in
             let item = NSPasteboardItem()
@@ -25,7 +24,7 @@ import FinderMenuCore
         board.clearContents()
         guard board.writeObjects(items) else { throw FinderMoveError.clipboardUnavailable }
         let state = FinderCutState(
-            token: token, changeCount: board.changeCount, fileCount: sources.count, commandID: previousID + 1)
+            token: token, changeCount: board.changeCount, fileCount: sources.count, commandID: commandID)
         try store.save(state)
         return state
     }

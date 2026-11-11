@@ -139,17 +139,23 @@ public actor HistoryStore: HistoryRepository {
         defer { PerformanceTrace.signposter.endInterval("HistorySave", interval) }
         try Task.checkCancellation()
         try prune(policy: policy, now: now)
+        try Task.checkCancellation()
         let hash = content.hash
         if let existing = try db.rows(
             "SELECT id FROM history WHERE hash = ?", [.text(hash)], map: { Database.text($0, 0) }
         ).first {
-            if case .image(let png, let thumbnail) = content {
-                guard let id = UUID(uuidString: existing) else { throw StoreError.missingContent }
-                try restoreMissingImages(id, png: png, thumbnail: thumbnail)
+            try db.transaction {
+                // BEGIN IMMEDIATE 可能等待其他连接；取得写锁后重新检查取消。
+                try Task.checkCancellation()
+                if case .image(let png, let thumbnail) = content {
+                    guard let id = UUID(uuidString: existing) else { throw StoreError.missingContent }
+                    try restoreMissingImages(id, png: png, thumbnail: thumbnail)
+                }
+                try db.execute(
+                    "UPDATE history SET copied_at = ?, source_id = ?, source_name = ? WHERE id = ?",
+                    [.real(now.timeIntervalSince1970), .text(sourceBundleID), .text(sourceName), .text(existing)])
+                try Task.checkCancellation()
             }
-            try db.execute(
-                "UPDATE history SET copied_at = ?, source_id = ?, source_name = ? WHERE id = ?",
-                [.real(now.timeIntervalSince1970), .text(sourceBundleID), .text(sourceName), .text(existing)])
             return
         }
         let pinnedBytes = try totals().pinned
@@ -160,6 +166,7 @@ public actor HistoryStore: HistoryRepository {
             do {
                 for (url, bytes) in [(imageURL(id, thumbnail: false), png), (imageURL(id, thumbnail: true), thumbnail)]
                 {
+                    try Task.checkCancellation()
                     try bytes.write(to: url, options: .atomic)
                     created.append(url)
                     try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
@@ -171,6 +178,7 @@ public actor HistoryStore: HistoryRepository {
         }
         do {
             try db.transaction {
+                try Task.checkCancellation()
                 let text: Database.Value
                 let preview: String
                 switch content {
@@ -188,6 +196,7 @@ public actor HistoryStore: HistoryRepository {
                         .real(now.timeIntervalSince1970), .text(sourceBundleID), .text(sourceName),
                         .int(content.byteCount),
                     ])
+                try Task.checkCancellation()
             }
         } catch {
             for url in created { try? FileManager.default.removeItem(at: url) }
@@ -226,6 +235,7 @@ public actor HistoryStore: HistoryRepository {
         let cutoff = now.addingTimeInterval(-Double(policy.days) * 86400).timeIntervalSince1970
         var removed: [RetentionEntry] = []
         try db.transaction {
+            try Task.checkCancellation()
             // 仅返回需要删除的记录，不再为每次复制装载所有历史。
             let expired = try retentionEntries(whereSQL: "favorite = 0 AND copied_at < ?", values: [.real(cutoff)])
             try deleteRows(expired)

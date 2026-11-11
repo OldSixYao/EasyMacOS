@@ -67,6 +67,29 @@ public struct FinderCutStateStore: Sendable {
         // 仅包含随机标记与计数，不在扩展可读状态中保存源文件路径。
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
+
+    /// 新剪切可替换损坏的临时状态；独立编号先落盘，避免重启或恢复后复用旧菜单编号。
+    /// 仅由宿主的串行剪切入口调用，扩展仍只读取剪切状态。
+    public func reserveCommandID(pasteboardChangeCount: Int) throws -> Int {
+        let previous: FinderCutState?
+        do { previous = try load() }
+        catch is DecodingError { previous = nil }
+        catch FinderMoveError.expiredCut { previous = nil }
+
+        let sequenceURL = url.appendingPathExtension("sequence")
+        let sequence: Int
+        do { sequence = try JSONDecoder().decode(Int.self, from: Data(contentsOf: sequenceURL)) }
+        catch let error as CocoaError where error.code == .fileReadNoSuchFile { sequence = 0 }
+        guard (0...FinderCutState.maximumCommandID).contains(sequence) else { throw FinderMoveError.expiredCut }
+        // 兼容尚无独立编号的旧版本；同一次剪贴板服务会话中变更计数持续递增。
+        let last = max(sequence, previous?.commandID ?? 0, max(0, pasteboardChangeCount))
+        guard last < FinderCutState.maximumCommandID else { throw FinderMoveError.expiredCut }
+        let next = last + 1
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder().encode(next).write(to: sequenceURL, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: sequenceURL.path)
+        return next
+    }
 }
 
 public enum FinderMoveValidation {
