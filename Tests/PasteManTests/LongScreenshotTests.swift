@@ -560,19 +560,28 @@ private func longBytes(_ image: CGImage) -> Data { image.dataProvider!.data! as 
     }
 }
 
+@MainActor private final class LongEditorTextRecognizer: ScreenshotTextRecognizing {
+    var input: ScreenshotTextInput?
+    func recognize(_ input: ScreenshotTextInput, progress: @escaping @Sendable (Double) -> Void) async throws -> String {
+        self.input = input; progress(1); return "长图文字"
+    }
+}
+
 @Suite("长截屏编辑与输出", .serialized) @MainActor struct LongScreenshotOutputTests {
     private func wait(_ condition: () -> Bool) async throws {
         let end = ContinuousClock.now.advanced(by: .seconds(6))
         while !condition(), ContinuousClock.now < end { try await Task.sleep(for: .milliseconds(3)) }
         try #require(condition())
     }
-    private func selected(save: @escaping (Data) async throws -> Bool = { _ in false }) async throws -> (ScreenshotCoordinator, ScreenshotOverlay, LongScrollStub) {
+    private func selected(save: @escaping (Data) async throws -> Bool = { _ in false },
+                          textRecognizer: any ScreenshotTextRecognizing = SystemScreenshotTextRecognizer.shared) async throws -> (ScreenshotCoordinator, ScreenshotOverlay, LongScrollStub) {
         _ = NSApplication.shared
         let capture = LongCaptureStub(), driver: LongScrollStub
         driver = LongScrollStub(capture)
         let long = LongScreenshotCoordinator(capture: capture, scroll: driver, settleInterval: .milliseconds(1), observesSystem: false)
         let coordinator = ScreenshotCoordinator(captureService: LongSelectionCapture(), pins: PinnedScreenshotManager(presentWindow: { _ in }),
-            presentWindow: { _ in }, saveImage: save, longCapture: long, presentLongWindow: { _ in }, presentLongControls: { _ in })
+            presentWindow: { _ in }, saveImage: save, longCapture: long, presentLongWindow: { _ in }, presentLongControls: { _ in },
+            textRecognizer: textRecognizer, presentTextWindow: { _ in })
         coordinator.validateLongAccess = { true }
         coordinator.start(screens: [ScreenshotScreen(id: 9, frame: CGRect(x: 0, y: 0, width: 800, height: 600), scale: 1)],
             sourceID: "test.original", sourceName: "原始来源", prefersLongScreenshot: true)
@@ -589,12 +598,62 @@ private func longBytes(_ image: CGImage) -> Data { image.dataProvider!.data! as 
         #expect(view.state.toolbarHeight == 46)
         return (coordinator, view, driver)
     }
-    private func editing(save: @escaping (Data) async throws -> Bool = { _ in false }) async throws -> ScreenshotCoordinator {
-        let (coordinator, view, _) = try await selected(save: save)
+    private func editing(save: @escaping (Data) async throws -> Bool = { _ in false },
+                         textRecognizer: any ScreenshotTextRecognizing = SystemScreenshotTextRecognizer.shared) async throws -> ScreenshotCoordinator {
+        let (coordinator, view, _) = try await selected(save: save, textRecognizer: textRecognizer)
         view.state.action?(.confirm)
         #expect(coordinator.isActive && coordinator.windows.isEmpty && view.window == nil)
         try await wait { coordinator.phase == .longEditing }
         return coordinator
+    }
+    @Test func textRecognitionUsesWholeDocumentAndRestoresAnnotationsAndPreviewMode() async throws {
+        let recognizer = LongEditorTextRecognizer()
+        let coordinator = try await editing(textRecognizer: recognizer)
+        defer { coordinator.cancel() }
+        let editor = try #require(coordinator.longEditor)
+        editor.setZoom(.actual)
+        let annotation = ScreenshotAnnotation(tool: .text, points: [CGPoint(x: 10, y: 300)],
+            color: AnnotationColor.palette[0], width: 3, text: "新增文字")
+        editor.state.history.append(annotation)
+        let origin = editor.scrollView.contentView.bounds.origin
+        var copied = ""
+        coordinator.onCopyText = { text, id, name in
+            #expect(id == "test.page" && name == "测试页面"); copied = text; return true
+        }
+        editor.state.action?(.recognizeText)
+        let session = try #require(coordinator.textSession)
+        try await wait { session.state == .ready }
+        if case .image(let image, let size, let marks) = try #require(recognizer.input) {
+            #expect(image.width == 192 && image.height == 353 && size == editor.document.pointSize)
+            #expect(marks == [annotation])
+        } else { Issue.record("长图未使用完整原图") }
+        session.textView.string = "长图编辑后的文字"
+        session.textView.selectAll(nil)
+        session.textView.copy(nil)
+        #expect(copied == "长图编辑后的文字" && coordinator.phase == .recognizingText)
+        session.close()
+        #expect(coordinator.phase == .longEditing && !editor.state.busy && coordinator.longEditor === editor)
+        #expect(editor.state.history.annotations == [annotation] && editor.state.previewMode == .actual)
+        #expect(editor.scrollView.contentView.bounds.origin == origin)
+    }
+    @Test func textCopyAllFailureKeepsLongEditorAndSuccessEndsEditing() async throws {
+        let coordinator = try await editing(textRecognizer: LongEditorTextRecognizer())
+        defer { coordinator.cancel() }
+        let editor = try #require(coordinator.longEditor)
+        editor.state.action?(.recognizeText)
+        let session = try #require(coordinator.textSession)
+        try await wait { session.state == .ready }
+        session.textView.string = "长图复制内容"
+        coordinator.onCopyText = { _, _, _ in false }
+        #expect(!session.copyAll())
+        #expect(coordinator.phase == .recognizingText && coordinator.longEditor === editor && session.state == .ready)
+        #expect(session.textView.string == "长图复制内容")
+        var copied = ""
+        coordinator.onCopyText = { text, _, _ in copied = text; return true }
+        #expect(session.copyAll() && copied == "长图复制内容")
+        #expect(session.state == .closed && session.window.contentView == nil)
+        #expect(coordinator.phase == .idle && !coordinator.isActive && coordinator.longEditor == nil && coordinator.textSession == nil)
+        #expect(editor.window.contentView == nil)
     }
     @Test func permissionAndAnnotationsPreventCaptureAndDisablingCancelsEveryStage() async throws {
         let (locked, view, driver) = try await selected()

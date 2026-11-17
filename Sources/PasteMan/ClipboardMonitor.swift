@@ -143,6 +143,11 @@ import PasteManCore
         }
     }
 
+    func recordRecognizedText(_ text: String, sourceID: String, sourceName: String, ticket: Int) async throws {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        try await recordScreenshot(sourceID: sourceID, sourceName: sourceName, ticket: ticket) { .text(text) }
+    }
+
     private func recordScreenshot(sourceID: String, sourceName: String, ticket: Int,
                                   prepare: @escaping @Sendable () async throws -> PreparedContent) async throws {
         guard screenshotTicket(sourceID: sourceID) == ticket else { return }

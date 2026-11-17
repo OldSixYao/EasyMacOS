@@ -55,6 +55,9 @@ import UniformTypeIdentifiers
     }
     deinit { pressureSource?.cancel() }
     var onCopy: ((ScreenshotImage, String, String) -> Bool)?
+    var onCopyText: ((String, String, String) -> Bool)?
+    var textRecognizer: any ScreenshotTextRecognizing = SystemScreenshotTextRecognizer.shared
+    var presentTextWindow: (NSPanel) -> Void = { NSApp.activate(); $0.makeKeyAndOrderFront(nil) }
     var count: Int { windows.count }
     var cachedDisplayByteCount: Int {
         windows.reduce(0) { $0 + (($1.contentView as? PinnedScreenshotView)?.displayByteCount ?? 0) }
@@ -102,6 +105,9 @@ import UniformTypeIdentifiers
         let view = PinnedScreenshotView(image: image, saveImage: saveImage, reportError: reportError)
         view.frame = CGRect(origin: .zero, size: initialFrame.size)
         view.onCopy = { [weak self] value in self?.onCopy?(value, sourceID, sourceName) ?? false }
+        view.textRecognizer = textRecognizer
+        view.presentTextWindow = presentTextWindow
+        view.onCopyText = { [weak self] text in self?.onCopyText?(text, sourceID, sourceName) ?? false }
         view.onReset = { [weak window] in window?.setContentSize(image.pointSize) }
         view.onClose = { [weak window] in window?.close() }
         window.contentView = view
@@ -153,6 +159,10 @@ import UniformTypeIdentifiers
     private let reportError: (String) -> Void
     private var saveTask: Task<Void, Never>?
     private var disposed = false
+    var textRecognizer: any ScreenshotTextRecognizing = SystemScreenshotTextRecognizer.shared
+    var presentTextWindow: (NSPanel) -> Void = { NSApp.activate(); $0.makeKeyAndOrderFront(nil) }
+    var onCopyText: ((String) -> Bool)?
+    private var textSession: ScreenshotTextSession?
     init(image: PinnedImageStorage, saveImage: @escaping (Data) async throws -> Bool, reportError: @escaping (String) -> Void) {
         self.image = image
         saveImageData = saveImage
@@ -162,8 +172,8 @@ import UniformTypeIdentifiers
         layerContentsRedrawPolicy = .onSetNeedsDisplay
         layer?.contentsGravity = .resizeAspect
         toolTip = L.t(
-            "Drag to move. Double-click to dismiss. Scroll or resize from the edges to zoom. Right-click to copy or save.",
-            "拖动移动，双击关闭钉图，滚轮或拖拽边缘缩放。右键可复制或保存。")
+            "Drag to move. Double-click to dismiss. Scroll or resize from the edges to zoom. Right-click to copy, save, or recognize text.",
+            "拖动移动，双击关闭钉图，滚轮或拖拽边缘缩放。右键可复制、保存或识别文字。")
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override var mouseDownCanMoveWindow: Bool { false }
@@ -270,6 +280,7 @@ import UniformTypeIdentifiers
         let menu = NSMenu()
         for (title, action) in [
             (L.t("Copy", "复制"), #selector(copyImage)), (L.t("Save…", "保存…"), #selector(saveImage)),
+            (L.t("Recognize text", "识别文字"), #selector(recognizeText)),
             (L.t("Original size", "恢复原始显示比例"), #selector(resetSize)), (L.t("Close", "关闭"), #selector(closeImage)),
         ] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
@@ -277,6 +288,15 @@ import UniformTypeIdentifiers
             menu.addItem(item)
         }
         return menu
+    }
+    @objc private func recognizeText() {
+        guard !disposed else { return }
+        if let textSession { textSession.show(); return }
+        let session = ScreenshotTextSession(input: .pinned(image), recognizer: textRecognizer, presentWindow: presentTextWindow)
+        session.onCopy = { [weak self] in self?.onCopyText?($0) ?? false }
+        session.onClose = { [weak self] _ in self?.textSession = nil }
+        textSession = session
+        session.show()
     }
     @objc private func copyImage() {
         guard !disposed, copyTask == nil else { return }
@@ -315,6 +335,8 @@ import UniformTypeIdentifiers
     }
     func dispose() {
         disposed = true
+        textSession?.close(notify: false); textSession = nil
+        onCopyText = nil
         displayRevision += 1
         layer?.contents = nil
         displayImage = nil

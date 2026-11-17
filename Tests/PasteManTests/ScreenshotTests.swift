@@ -159,6 +159,12 @@ private func pixel(_ image: CGImage, _ x: Int, _ y: Int) -> [UInt8] {
 }
 
 @Suite("Screenshot integration", .serialized) @MainActor struct ScreenshotIntegrationTests {
+    @Test func scrollingScreenshotButtonUsesAvailableSystemSymbol() throws {
+        let image = try #require(NSImage(systemSymbolName: ScreenshotToolbar.scrollingScreenshotSymbol,
+            accessibilityDescription: "长截屏"))
+        #expect(image.size.width > 0 && image.size.height > 0)
+    }
+
     @Test func fullScreenOverlaysDoNotAnimateWhenPresentedOrClosed() async throws {
         let service = DelayedScreenCapture()
         var presented: [NSPanel] = []
@@ -528,14 +534,14 @@ private func pixel(_ image: CGImage, _ x: Int, _ y: Int) -> [UInt8] {
         var copied: ScreenshotImage?
         pins.onCopy = { value, _, _ in copied = value; return true }
         let menu = try #require(view.menu(for: increase))
-        let copy = try #require(menu.items.first)
+        let copy = try #require(menu.items.first { $0.action == NSSelectorFromString("copyImage") })
         #expect(NSApp.sendAction(try #require(copy.action), to: copy.target, from: copy))
         for _ in 0..<200 where copied == nil { try await Task.sleep(for: .milliseconds(5)) }
         #expect(copied?.png == image.png && copied?.pointSize == image.pointSize)
         let pixels = try #require(copied?.image)
         #expect(pixels.width == image.image.width && pixels.height == image.image.height)
         #expect(pixel(pixels, 10, 10) == pixel(image.image, 10, 10))
-        let reset = menu.items[2]
+        let reset = try #require(menu.items.first { $0.action == NSSelectorFromString("resetSize") })
         #expect(NSApp.sendAction(try #require(reset.action), to: reset.target, from: reset))
         #expect(view.bounds.size == image.pointSize)
         view.scrollWheel(with: decrease)

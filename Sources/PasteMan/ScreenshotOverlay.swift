@@ -29,7 +29,7 @@ import SwiftUI
 enum ScreenshotEditorAction {
     case tool(AnnotationTool)
     case preview(ScreenshotPreviewMode)
-    case undo, redo, reselect, longScreenshot, confirm, copy, save, pin, cancel
+    case undo, redo, reselect, longScreenshot, recognizeText, confirm, copy, save, pin, cancel
 }
 
 enum ScreenshotPreviewMode: String, CaseIterable {
@@ -59,7 +59,8 @@ enum ScreenshotPreviewMode: String, CaseIterable {
 
 struct ScreenshotToolbar: View {
     @Bindable var state: ScreenshotEditorState
-    static let width: CGFloat = 492
+    static let width: CGFloat = 528
+    static let scrollingScreenshotSymbol = "arrow.down.doc"
     static let tint = Color(red: 0, green: 0.76, blue: 0.48)
 
     var body: some View {
@@ -81,7 +82,7 @@ struct ScreenshotToolbar: View {
                     enabled: !state.history.undone.isEmpty)
                 if !state.isLongEditor {
                     action("arrow.up.left.and.arrow.down.right", title: L.t("Reselect", "重新框选"), action: .reselect)
-                    action("rectangle.portrait.and.arrow.down", title: state.canAdjust
+                    action(Self.scrollingScreenshotSymbol, title: state.canAdjust
                         ? L.t("Start scrolling screenshot", "开始长截屏")
                         : L.t("Reselect before starting a scrolling screenshot", "已有标注，请先重新框选再长截屏"),
                         action: .longScreenshot, enabled: state.canAdjust)
@@ -94,6 +95,8 @@ struct ScreenshotToolbar: View {
                     }
                 }
                 separator
+                action("text.viewfinder", title: L.t("Recognize text", "识别文字"), action: .recognizeText)
+                    .accessibilityIdentifier("screenshot.recognizeText")
                 action("square.and.arrow.down", title: L.t("Save PNG…", "保存 PNG…"), action: .save)
                 action("pin", title: L.t("Pin to desktop", "钉在桌面"), action: .pin)
                 action("xmark", title: L.t("Cancel Esc", "取消 Esc"), action: .cancel, color: .red)
@@ -637,6 +640,7 @@ private struct ScreenshotHoverFeedback: ViewModifier {
             updatePreview()
         case .reselect: coordinator?.reselect()
         case .longScreenshot: coordinator?.startLongScreenshot(from: self)
+        case .recognizeText: coordinator?.recognizeText(from: self)
         case .confirm:
             if state.confirmsLongScreenshot { coordinator?.startLongScreenshot(from: self) }
             else { coordinator?.finish(.copy, from: self) }

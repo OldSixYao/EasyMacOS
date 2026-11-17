@@ -155,6 +155,25 @@ import SwiftUI
                 if written { watcher?.ignoreOwnWrite() }
                 return written
             }
+            screenshotController.onCopyText = { [weak watcher, weak self] text, sourceID, sourceName in
+                guard SystemClipboard().write(.text(text)) else { return false }
+                watcher?.ignoreOwnWrite()
+                let ticket = watcher?.screenshotTicket(sourceID: sourceID)
+                Task { [weak watcher, weak self] in
+                    guard let ticket else { return }
+                    do {
+                        try await watcher?.recordRecognizedText(text, sourceID: sourceID, sourceName: sourceName, ticket: ticket)
+                    } catch {
+                        guard watcher?.screenshotTicket(sourceID: sourceID) == ticket else { return }
+                        self?.model?.recordingIssue = L.error(error)
+                        let alert = NSAlert()
+                        alert.messageText = L.t("Copied; history not saved", "已复制，未保存到历史")
+                        alert.informativeText = L.error(error)
+                        NSApp.activate(); alert.runModal()
+                    }
+                }
+                return true
+            }
             screenshotController.onCopy = { [weak watcher, weak self] image, sourceID, sourceName in
                 guard SystemClipboard().write(.image(png: image.png, thumbnail: Data())) else { return false }
                 watcher?.ignoreOwnWrite()

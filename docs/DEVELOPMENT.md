@@ -148,7 +148,25 @@ Only copying a screenshot or pinned image can add it to history. Recording must 
 
 Screen capture has a separate working-memory guard (100 million pixels across captured displays and per exported bitmap). Capture buffers and annotation previews are released when a session ends; preview/export rendering is serialized off the main actor. Protected content may be blank according to macOS rules. Display-configuration changes cancel an active session; start another capture after the displays settle.
 
-跨显示器选区、横向拼接、窗口吸附、文字识别、编辑已展平钉图及退出后恢复钉图暂不支持。
+跨显示器选区、横向拼接、窗口吸附、编辑已展平钉图及退出后恢复钉图暂不支持。
+
+## 截图文字识别
+
+普通截图框选后，在工具栏点击“识别文字”；长图编辑工具栏提供相同按钮，桌面钉图则在右键菜单选择“识别文字”。识别由系统原生视觉框架在本机完成，无需联网、下载第三方模型或增加授权。普通截图只处理框选区域，长截图和钉图处理完整原图；使用原始像素及已提交标注，预览缩放不影响识别清晰度。
+
+识别结果窗口显示处理进度，完成后直接显示可编辑文字，不显示固定操作提示。选择部分文字复制后保留结果窗口；点击“复制全部”成功后关闭结果窗口并结束普通截图或长截图编辑，钉图则保留原图。复制失败时保留结果与编辑内容以便重试。手动关闭结果窗口或按退出键返回原图，恢复普通截图的选区与标注、长图的查看位置；输入法组词期间先由输入法处理退出键。钉图在识别期间保持显示。未发现文字与识别失败分别提示，并可重试。
+
+长图按最多四千零九十六像素高、相邻重叠二百五十六像素的横条处理；窄长图进一步按宽度缩短分段，保留小字号中文细节。标注按条渲染，避免再次生成整张长图或进行压缩。根据原图坐标整理行序，只合并重叠位置的相同文字，保留不同位置的重复内容。结果为纯文本，不还原表格结构。
+
+文字复制沿用原截图或钉图的来源应用信息，通过显式写入路径记录，继续遵守剪贴板记录开关、暂停、权限、来源排除及容量规则；关闭记录时仍可复制。复制失败保留编辑内容，历史保存失败不影响已经复制的文字。关闭结果窗口取消所属任务；关闭截图模块取消当前截图及其识别，已有钉图仍可识别。关闭钉图或全部钉图时取消相应识别，迟到结果不会重新显示窗口。
+
+以下检查使用合成图片、模拟识别服务、临时数据库与命名剪贴板，不采集屏幕或读取真实剪贴板：
+
+```sh
+./scripts/test.sh --filter ScreenshotText
+./scripts/test.sh --filter LongScreenshotOutputTests
+PASTEMAN_RENDER_TESTS=1 ./scripts/test.sh --filter RenderingTests
+```
 
 ## 自动滚动长截屏
 

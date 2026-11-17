@@ -52,7 +52,7 @@ struct CapturedScreen: Sendable {
 }
 
 @MainActor final class ScreenshotCoordinator {
-    enum Phase: Equatable { case idle, capturing, selecting, editing, longCapturing, longEditing, exporting }
+    enum Phase: Equatable { case idle, capturing, selecting, editing, longCapturing, longEditing, exporting, recognizingText }
     private(set) var phase: Phase = .idle
     private(set) var selectedScreen: CGDirectDisplayID?
     private(set) var windows: [NSPanel] = []
@@ -70,6 +70,9 @@ struct CapturedScreen: Sendable {
     private let saveImage: (Data) async throws -> Bool
     private let presentLongWindow: (LongScreenshotEditor) -> Void
     private let presentLongControls: (NSPanel) -> Void
+    private let textRecognizer: any ScreenshotTextRecognizing
+    private let presentTextWindow: (NSPanel) -> Void
+    private(set) var textSession: ScreenshotTextSession?
     let longCapture: LongScreenshotCoordinator
     private(set) var longEditor: LongScreenshotEditor?
     private var longControls: LongScreenshotControls?
@@ -84,6 +87,7 @@ struct CapturedScreen: Sendable {
     }
     let pins: PinnedScreenshotManager
     var onCopy: ((ScreenshotImage, String, String) -> Bool)?
+    var onCopyText: ((String, String, String) -> Bool)?
     var onError: ((String) -> Void)?
     var onCopyColor: ((String) -> Bool)?
     var isActive: Bool { phase != .idle }
@@ -98,7 +102,9 @@ struct CapturedScreen: Sendable {
         saveImage: @escaping (Data) async throws -> Bool = { try await ScreenshotFileSaver.save($0) },
         longCapture: LongScreenshotCoordinator = LongScreenshotCoordinator(),
         presentLongWindow: @escaping (LongScreenshotEditor) -> Void = { $0.show() },
-        presentLongControls: @escaping (NSPanel) -> Void = { $0.orderFrontRegardless() }
+        presentLongControls: @escaping (NSPanel) -> Void = { $0.orderFrontRegardless() },
+        textRecognizer: any ScreenshotTextRecognizing = SystemScreenshotTextRecognizer.shared,
+        presentTextWindow: @escaping (NSPanel) -> Void = { NSApp.activate(); $0.makeKeyAndOrderFront(nil) }
     ) {
         self.captureService = captureService
         self.presentWindow = presentWindow
@@ -107,7 +113,12 @@ struct CapturedScreen: Sendable {
         self.longCapture = longCapture
         self.presentLongWindow = presentLongWindow
         self.presentLongControls = presentLongControls
+        self.textRecognizer = textRecognizer
+        self.presentTextWindow = presentTextWindow
         pins.onCopy = { [weak self] image, id, name in self?.onCopy?(image, id, name) ?? false }
+        pins.onCopyText = { [weak self] text, id, name in self?.onCopyText?(text, id, name) ?? false }
+        pins.textRecognizer = textRecognizer
+        pins.presentTextWindow = presentTextWindow
         longCapture.onScrollSuspension = { [weak self] in self?.onLongScrollSuspension?($0) }
         longCapture.onProgress = { [weak self] progress in
             self?.longControls?.state.width = progress.width
@@ -129,6 +140,7 @@ struct CapturedScreen: Sendable {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, event.keyCode == 53 else { return event }
             if let text = NSApp.keyWindow?.firstResponder as? NSTextView, text.hasMarkedText() { return event }
+            if self.textSession != nil { return event }
             // Saving uses a system sheet; let Escape dismiss that sheet first.
             if self.saving { return event }
             self.cancel()
@@ -202,6 +214,7 @@ struct CapturedScreen: Sendable {
     }
     func cancel() {
         generation += 1
+        textSession?.close(notify: false); textSession = nil
         captureTask?.cancel()
         captureTask = nil
         exportTask?.cancel()
@@ -264,6 +277,7 @@ struct CapturedScreen: Sendable {
         longEditor = editor
         editor.onClose = { [weak self] in self?.cancel() }
         editor.onOutput = { [weak self] in self?.finishLongScreenshot($0) }
+        editor.onRecognizeText = { [weak self] in self?.recognizeLongScreenshotText() }
         presentLongWindow(editor)
     }
 
@@ -273,6 +287,7 @@ struct CapturedScreen: Sendable {
     }
 
     func showLongScreenshotEditor() {
+        if let textSession { textSession.show(); return }
         guard let longEditor else { return }
         presentLongWindow(longEditor)
     }
@@ -281,6 +296,52 @@ struct CapturedScreen: Sendable {
         guard phase == .longCapturing else { return }
         longControls?.state.stopping = true
         longCapture.stop()
+    }
+
+    func recognizeText(from view: ScreenshotOverlay) {
+        if let textSession { textSession.show(); return }
+        guard phase == .editing else { return }
+        view.commitText()
+        guard let base = view.selectedImage else { return }
+        let version = generation
+        phase = .recognizingText
+        view.state.busy = true
+        let session = makeTextSession(.image(base, pointSize: view.selection.size, annotations: view.state.history.annotations))
+        session.onClose = { [weak self, weak view] reason in
+            guard let self, let view, self.generation == version else { return }
+            self.textSession = nil
+            if reason == .copied { self.cancel(); return }
+            self.restoreEditor(view)
+        }
+        for window in windows { window.orderOut(nil) }
+        session.show()
+    }
+
+    func recognizeLongScreenshotText() {
+        if let textSession { textSession.show(); return }
+        guard phase == .longEditing, let editor = longEditor else { return }
+        editor.canvas.commitText()
+        let version = generation
+        phase = .recognizingText
+        editor.state.busy = true
+        let session = makeTextSession(.image(editor.document.image, pointSize: editor.document.pointSize,
+            annotations: editor.state.history.annotations))
+        session.onClose = { [weak self, weak editor] reason in
+            guard let self, let editor, self.generation == version else { return }
+            self.textSession = nil
+            if reason == .copied { self.cancel(); return }
+            self.restoreLongEditor(editor)
+        }
+        editor.window.orderOut(nil)
+        session.show()
+    }
+
+    private func makeTextSession(_ input: ScreenshotTextInput) -> ScreenshotTextSession {
+        let session = ScreenshotTextSession(input: input, recognizer: textRecognizer, presentWindow: presentTextWindow)
+        let id = sourceID, name = sourceName
+        session.onCopy = { [weak self] text in self?.onCopyText?(text, id, name) ?? false }
+        textSession = session
+        return session
     }
 
     func finishLongScreenshot(_ output: Output) {
@@ -392,7 +453,9 @@ struct CapturedScreen: Sendable {
         phase = .editing
         view.state.busy = false
         view.showToolbar()
-        for window in windows { presentWindow(window) }
+        let active = windows.first { $0.contentView === view }
+        for window in windows where window !== active { presentWindow(window) }
+        if let active { presentWindow(active); active.makeFirstResponder(view) }
     }
 }
 

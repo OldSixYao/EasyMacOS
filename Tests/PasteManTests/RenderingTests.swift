@@ -135,14 +135,14 @@ import Testing
         let editorState = ScreenshotEditorState()
         editorState.tool = .arrow
         try await snapshot(
-            ScreenshotToolbar(state: editorState), size: NSSize(width: 492, height: 56),
+            ScreenshotToolbar(state: editorState), size: NSSize(width: editorState.toolbarWidth, height: 56),
             appearance: .aqua, to: output.appendingPathComponent("screenshot-toolbar-light.png"))
         try await snapshot(
-            ScreenshotToolbar(state: editorState), size: NSSize(width: 492, height: 56),
+            ScreenshotToolbar(state: editorState), size: NSSize(width: editorState.toolbarWidth, height: 56),
             appearance: .darkAqua, to: output.appendingPathComponent("screenshot-toolbar-dark.png"))
         editorState.optionsExpanded = true
         try await snapshot(
-            ScreenshotToolbar(state: editorState), size: NSSize(width: 492, height: 92),
+            ScreenshotToolbar(state: editorState), size: NSSize(width: editorState.toolbarWidth, height: 92),
             appearance: .darkAqua, to: output.appendingPathComponent("screenshot-toolbar-options-dark.png"))
         editorState.optionsExpanded = false
         editorState.prefersLongScreenshot = true
@@ -155,6 +155,27 @@ import Testing
         let screen = ScreenshotScreen(id: 1, frame: CGRect(x: 0, y: 0, width: 800, height: 600), scale: 1)
         let capture = CapturedScreen(
             screen: screen, image: try #require(sample.cgImage(forProposedRect: nil, context: nil, hints: nil)))
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            let result = ScreenshotTextSession(input: .image(capture.image, pointSize: screen.frame.size, annotations: []),
+                recognizer: RenderingTextRecognizer(), presentWindow: { _ in })
+            defer { result.close() }
+            result.window.appearance = NSAppearance(named: appearance)
+            result.show()
+            for _ in 0..<100 where result.state == .recognizing { try await Task.sleep(for: .milliseconds(5)) }
+            #expect(result.state == .ready)
+            let content = try #require(result.window.contentView)
+            content.wantsLayer = true
+            result.window.effectiveAppearance.performAsCurrentDrawingAppearance {
+                content.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+            }
+            try await Task.sleep(for: .milliseconds(150))
+            content.layoutSubtreeIfNeeded()
+            let bitmap = try #require(content.bitmapImageRepForCachingDisplay(in: content.bounds))
+            content.cacheDisplay(in: content.bounds, to: bitmap)
+            let png = try #require(bitmap.representation(using: .png, properties: [:]))
+            let mode = appearance == .aqua ? "light" : "dark"
+            try png.write(to: output.appendingPathComponent("screenshot-text-result-\(mode).png"))
+        }
         let coordinator = ScreenshotCoordinator(presentWindow: { _ in })
         let overlay = ScreenshotOverlay(capture: capture, coordinator: coordinator)
         let overlayWindow = NSWindow(
@@ -202,5 +223,11 @@ import Testing
         let png = try #require(bitmap.representation(using: .png, properties: [:]))
         try png.write(to: url)
         #expect(png.count > 1000)
+    }
+}
+
+private struct RenderingTextRecognizer: ScreenshotTextRecognizing {
+    func recognize(_ input: ScreenshotTextInput, progress: @escaping @Sendable (Double) -> Void) async throws -> String {
+        "截图文字识别\n这段文字可以编辑和复制。\nHello, EasyMacOS! 12345"
     }
 }
