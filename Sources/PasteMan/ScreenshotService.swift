@@ -52,7 +52,7 @@ struct CapturedScreen: Sendable {
 }
 
 @MainActor final class ScreenshotCoordinator {
-    enum Phase: Equatable { case idle, capturing, selecting, editing, longCapturing, longEditing, exporting, recognizingText }
+    enum Phase: Equatable { case idle, capturing, selecting, editing, longCapturing, longEditing, exporting, recognizingText, recognizingBarcodes }
     private(set) var phase: Phase = .idle
     private(set) var selectedScreen: CGDirectDisplayID?
     private(set) var windows: [NSPanel] = []
@@ -71,6 +71,7 @@ struct CapturedScreen: Sendable {
     private let presentLongWindow: (LongScreenshotEditor) -> Void
     private let presentLongControls: (NSPanel) -> Void
     private let textRecognizer: any ScreenshotTextRecognizing
+    private let barcodeRecognizer: any ScreenshotTextRecognizing
     private let presentTextWindow: (NSPanel) -> Void
     private(set) var textSession: ScreenshotTextSession?
     let longCapture: LongScreenshotCoordinator
@@ -104,6 +105,7 @@ struct CapturedScreen: Sendable {
         presentLongWindow: @escaping (LongScreenshotEditor) -> Void = { $0.show() },
         presentLongControls: @escaping (NSPanel) -> Void = { $0.orderFrontRegardless() },
         textRecognizer: any ScreenshotTextRecognizing = SystemScreenshotTextRecognizer.shared,
+        barcodeRecognizer: any ScreenshotTextRecognizing = SystemScreenshotBarcodeRecognizer.shared,
         presentTextWindow: @escaping (NSPanel) -> Void = { NSApp.activate(); $0.makeKeyAndOrderFront(nil) }
     ) {
         self.captureService = captureService
@@ -114,10 +116,12 @@ struct CapturedScreen: Sendable {
         self.presentLongWindow = presentLongWindow
         self.presentLongControls = presentLongControls
         self.textRecognizer = textRecognizer
+        self.barcodeRecognizer = barcodeRecognizer
         self.presentTextWindow = presentTextWindow
         pins.onCopy = { [weak self] image, id, name in self?.onCopy?(image, id, name) ?? false }
         pins.onCopyText = { [weak self] text, id, name in self?.onCopyText?(text, id, name) ?? false }
         pins.textRecognizer = textRecognizer
+        pins.barcodeRecognizer = barcodeRecognizer
         pins.presentTextWindow = presentTextWindow
         longCapture.onScrollSuspension = { [weak self] in self?.onLongScrollSuspension?($0) }
         longCapture.onProgress = { [weak self] progress in
@@ -278,6 +282,7 @@ struct CapturedScreen: Sendable {
         editor.onClose = { [weak self] in self?.cancel() }
         editor.onOutput = { [weak self] in self?.finishLongScreenshot($0) }
         editor.onRecognizeText = { [weak self] in self?.recognizeLongScreenshotText() }
+        editor.onRecognizeBarcodes = { [weak self] in self?.recognizeLongScreenshotText(kind: .barcodes) }
         presentLongWindow(editor)
     }
 
@@ -298,15 +303,15 @@ struct CapturedScreen: Sendable {
         longCapture.stop()
     }
 
-    func recognizeText(from view: ScreenshotOverlay) {
+    func recognizeText(from view: ScreenshotOverlay, kind: ScreenshotRecognitionKind = .text) {
         if let textSession { textSession.show(); return }
         guard phase == .editing else { return }
         view.commitText()
         guard let base = view.selectedImage else { return }
         let version = generation
-        phase = .recognizingText
+        phase = kind == .text ? .recognizingText : .recognizingBarcodes
         view.state.busy = true
-        let session = makeTextSession(.image(base, pointSize: view.selection.size, annotations: view.state.history.annotations))
+        let session = makeTextSession(.image(base, pointSize: view.selection.size, annotations: view.state.history.annotations), kind: kind)
         session.onClose = { [weak self, weak view] reason in
             guard let self, let view, self.generation == version else { return }
             self.textSession = nil
@@ -317,15 +322,15 @@ struct CapturedScreen: Sendable {
         session.show()
     }
 
-    func recognizeLongScreenshotText() {
+    func recognizeLongScreenshotText(kind: ScreenshotRecognitionKind = .text) {
         if let textSession { textSession.show(); return }
         guard phase == .longEditing, let editor = longEditor else { return }
         editor.canvas.commitText()
         let version = generation
-        phase = .recognizingText
+        phase = kind == .text ? .recognizingText : .recognizingBarcodes
         editor.state.busy = true
         let session = makeTextSession(.image(editor.document.image, pointSize: editor.document.pointSize,
-            annotations: editor.state.history.annotations))
+            annotations: editor.state.history.annotations), kind: kind)
         session.onClose = { [weak self, weak editor] reason in
             guard let self, let editor, self.generation == version else { return }
             self.textSession = nil
@@ -336,8 +341,9 @@ struct CapturedScreen: Sendable {
         session.show()
     }
 
-    private func makeTextSession(_ input: ScreenshotTextInput) -> ScreenshotTextSession {
-        let session = ScreenshotTextSession(input: input, recognizer: textRecognizer, presentWindow: presentTextWindow)
+    private func makeTextSession(_ input: ScreenshotTextInput, kind: ScreenshotRecognitionKind) -> ScreenshotTextSession {
+        let session = ScreenshotTextSession(input: input, kind: kind,
+            recognizer: kind == .text ? textRecognizer : barcodeRecognizer, presentWindow: presentTextWindow)
         let id = sourceID, name = sourceName
         session.onCopy = { [weak self] text in self?.onCopyText?(text, id, name) ?? false }
         textSession = session

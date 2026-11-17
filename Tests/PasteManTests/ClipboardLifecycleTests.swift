@@ -1,4 +1,5 @@
 import AppKit
+import CSQLite
 import PasteManCore
 import Testing
 
@@ -80,6 +81,8 @@ private actor LifecycleRepository: HistoryRepository {
         repository = LifecycleRepository(store: try HistoryStore(directory: root))
         let board = LifecycleClipboard()
         monitor = ClipboardMonitor(clipboard: board, repository: repository, settings: settings, permissions: board)
+        let monitor = monitor
+        settings.onRecordingChanged = { [weak monitor] in monitor?.recordingStateChanged() }
     }
     func clean() {
         monitor.stop()
@@ -102,6 +105,53 @@ private actor LifecycleRepository: HistoryRepository {
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
         while try await !ready(), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
         try #require(try await ready())
+    }
+
+    @Test(arguments: [false, true])
+    func exclusionChangesCancelPendingSavesAndNeverReplayAfterRemoval(_ image: Bool) async throws {
+        let f = try LifecycleFixture(); defer { f.clean() }
+        let ticket = try #require(f.monitor.screenshotTicket(sourceID: "test.excluded"))
+        let pending = Task {
+            if image {
+                try await f.monitor.recordScreenshot(f.image(), sourceID: "test.excluded", sourceName: "合成来源", ticket: ticket)
+            } else {
+                try await f.monitor.recordRecognizedText("尚未保存的合成内容", sourceID: "test.excluded", sourceName: "合成来源", ticket: ticket)
+            }
+        }
+        try await wait { await f.repository.waitingSaves == 1 }
+        f.settings.excludedApps.insert("test.excluded")
+        #expect(f.monitor.screenshotTicket(sourceID: "test.excluded") == nil)
+        f.settings.excludedApps.remove("test.excluded")
+        await f.repository.releaseSaves()
+        try await pending.value
+        #expect(try await f.repository.store.list().isEmpty)
+        let fresh = try #require(f.monitor.screenshotTicket(sourceID: "test.excluded"))
+        try await f.monitor.recordRecognizedText("重新复制后的合成内容", sourceID: "test.excluded", sourceName: "合成来源", ticket: fresh)
+        #expect(try await f.repository.store.list().map(\.preview) == ["重新复制后的合成内容"])
+    }
+
+    @Test(arguments: [false, true])
+    func excludingSourceWhileSQLiteWaitsDoesNotInsertOrRefreshHistory(_ existing: Bool) async throws {
+        let f = try LifecycleFixture(); defer { f.clean() }
+        if existing {
+            try await f.repository.store.save(.text("等待写锁的合成内容"), sourceBundleID: "original", sourceName: "原始来源",
+                policy: RetentionPolicy(), now: Date().addingTimeInterval(-60))
+        }
+        let before = try await f.repository.store.list()
+        await f.repository.releaseSaves()
+        var database: OpaquePointer?
+        try #require(sqlite3_open(f.root.appendingPathComponent("history.sqlite").path, &database) == SQLITE_OK)
+        defer { sqlite3_close(database) }
+        try #require(sqlite3_exec(database, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK)
+        let ticket = try #require(f.monitor.screenshotTicket(sourceID: "test.excluded"))
+        let pending = Task {
+            try await f.monitor.recordRecognizedText("等待写锁的合成内容", sourceID: "test.excluded", sourceName: "已排除来源", ticket: ticket)
+        }
+        try await Task.sleep(for: .milliseconds(150))
+        f.settings.excludedApps.insert("test.excluded")
+        try #require(sqlite3_exec(database, "COMMIT", nil, nil, nil) == SQLITE_OK)
+        try await pending.value
+        #expect(try await f.repository.store.list() == before)
     }
 
     @Test(arguments: [false, true], ["pause", "disable", "clear", "lock"])

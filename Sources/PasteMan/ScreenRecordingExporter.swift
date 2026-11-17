@@ -10,6 +10,15 @@ extension ScreenRecordingExporting {
     }
 }
 
+struct ScreenRecordingRecoveryError: LocalizedError {
+    let playable: [URL]
+    let damaged: [URL]
+    var errorDescription: String? {
+        L.t("Some recording segments cannot be played. The original files have been preserved.",
+            "部分录屏片段无法播放，全部原始文件已保留。")
+    }
+}
+
 actor ScreenRecordingExporter: ScreenRecordingExporting {
     enum Method { case copy, passthrough, reencode }
     private(set) var lastMethod: Method?
@@ -71,27 +80,41 @@ actor ScreenRecordingExporter: ScreenRecordingExporting {
 
     private func inspect(_ urls: [URL]) async throws -> [Segment] {
         var segments: [Segment] = []
+        var damaged: [URL] = []
         for url in urls {
             try Task.checkCancellation()
-            let asset = AVURLAsset(url: url)
-            guard try await asset.load(.isPlayable),
-                let video = try await asset.loadTracks(withMediaType: .video).first,
-                let videoFormat = try await video.load(.formatDescriptions).first else {
-                throw ScreenRecordingError.empty
+            // 权限或目录暂时不可用时允许原样重试，不能误报为可跳过的损坏片段。
+            guard FileManager.default.isReadableFile(atPath: url.path) else {
+                throw CocoaError(.fileReadNoPermission)
             }
-            let range = try await video.load(.timeRange)
-            guard range.duration.isNumeric, range.duration > .zero else { throw ScreenRecordingError.empty }
-            let audio = try await asset.loadTracks(withMediaType: .audio)
-            var audioFormats: [CMFormatDescription] = []
-            for track in audio {
-                guard let format = try await track.load(.formatDescriptions).first else { throw ScreenRecordingError.empty }
-                audioFormats.append(format)
+            do { segments.append(try await inspectSegment(url)) }
+            catch {
+                try Task.checkCancellation()
+                damaged.append(url)
             }
-            segments.append(Segment(url: url, asset: asset, video: video, range: range,
-                transform: try await video.load(.preferredTransform), videoFormat: videoFormat,
-                audio: audio, audioFormats: audioFormats))
+        }
+        guard damaged.isEmpty else {
+            throw ScreenRecordingRecoveryError(playable: segments.map(\.url), damaged: damaged)
         }
         return segments
+    }
+
+    private func inspectSegment(_ url: URL) async throws -> Segment {
+        let asset = AVURLAsset(url: url)
+        guard try await asset.load(.isPlayable),
+            let video = try await asset.loadTracks(withMediaType: .video).first,
+            let videoFormat = try await video.load(.formatDescriptions).first else { throw ScreenRecordingError.empty }
+        let range = try await video.load(.timeRange)
+        guard range.duration.isNumeric, range.duration > .zero else { throw ScreenRecordingError.empty }
+        let audio = try await asset.loadTracks(withMediaType: .audio)
+        var audioFormats: [CMFormatDescription] = []
+        for track in audio {
+            guard let format = try await track.load(.formatDescriptions).first else { throw ScreenRecordingError.empty }
+            audioFormats.append(format)
+        }
+        return Segment(url: url, asset: asset, video: video, range: range,
+            transform: try await video.load(.preferredTransform), videoFormat: videoFormat,
+            audio: audio, audioFormats: audioFormats)
     }
 
     private func canPassThrough(_ segments: [Segment]) -> Bool {

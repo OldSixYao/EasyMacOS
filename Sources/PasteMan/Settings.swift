@@ -44,7 +44,14 @@ struct Shortcut: Codable, Equatable {
             onRetentionChanged?()
         }
     }
-    var excludedApps: Set<String> { didSet { defaults.set(excludedApps.sorted(), forKey: "excludedApps") } }
+    var excludedApps: Set<String> {
+        didSet {
+            guard oldValue != excludedApps else { return }
+            defaults.set(excludedApps.sorted(), forKey: "excludedApps")
+            // 隐私策略变化与暂停共用取消路径，覆盖已进入数据库写锁等待的内容。
+            onRecordingChanged?()
+        }
+    }
     @ObservationIgnored var onDockVisibilityChanged: (() -> Void)?
     var showInDock: Bool {
         didSet {

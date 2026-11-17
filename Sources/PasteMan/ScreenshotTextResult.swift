@@ -1,10 +1,41 @@
 import AppKit
 
+enum ScreenshotRecognitionKind: Sendable, CaseIterable {
+    case text, barcodes
+
+    var title: String {
+        switch self {
+        case .text: L.t("Recognize text", "识别文字")
+        case .barcodes: L.t("Recognize barcodes / QR codes", "识别条码/二维码")
+        }
+    }
+    var progressMessage: String {
+        switch self {
+        case .text: L.t("Recognizing text…", "正在识别文字…")
+        case .barcodes: L.t("Recognizing barcodes / QR codes…", "正在识别条码/二维码…")
+        }
+    }
+    var emptyMessage: String {
+        switch self {
+        case .text: L.t("No text was found. Return to the image or try again.", "未发现可识别的文字，可返回原图或重试。")
+        case .barcodes: L.t("No readable barcodes or QR codes were found. Include the complete code and try again.",
+            "未发现可识别的条形码或二维码，请框选完整码图后重试。")
+        }
+    }
+    var failurePrefix: String {
+        switch self {
+        case .text: L.t("Text recognition failed: ", "文字识别失败：")
+        case .barcodes: L.t("Barcode recognition failed: ", "条码识别失败：")
+        }
+    }
+}
+
 @MainActor final class ScreenshotTextSession: NSObject, NSWindowDelegate, NSTextViewDelegate {
     enum State: Equatable { case idle, recognizing, ready, empty, failed(String), closed }
     enum CloseReason { case back, copied }
     let window: NSPanel
     let textView = ScreenshotRecognitionTextView()
+    let kind: ScreenshotRecognitionKind
     private(set) var state = State.idle
     private(set) var progress: Double = 0
     var onClose: ((CloseReason) -> Void)?
@@ -22,11 +53,12 @@ import AppKit
     private let backButton = NSButton()
     private var copyMessage: String?
 
-    init(input: ScreenshotTextInput, recognizer: any ScreenshotTextRecognizing = SystemScreenshotTextRecognizer.shared,
+    init(input: ScreenshotTextInput, kind: ScreenshotRecognitionKind = .text,
+         recognizer: any ScreenshotTextRecognizing = SystemScreenshotTextRecognizer.shared,
          presentWindow: @escaping (NSPanel) -> Void = {
              NSApp.activate(); $0.makeKeyAndOrderFront(nil)
          }) {
-        self.input = input; self.recognizer = recognizer; self.presentWindow = presentWindow
+        self.input = input; self.kind = kind; self.recognizer = recognizer; self.presentWindow = presentWindow
         let visible = NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1000, height: 700)
         let size = CGSize(width: min(660, visible.width - 40), height: min(500, visible.height - 40))
         let panel = ScreenshotTextResultPanel(contentRect: CGRect(x: visible.midX - size.width / 2,
@@ -175,7 +207,7 @@ import AppKit
     }
 
     private func refresh() {
-        window.title = L.t("Recognize text", "识别文字")
+        window.title = kind.title
         copyButton.title = L.t("Copy all", "复制全部")
         retryButton.title = L.t("Retry", "重试")
         backButton.title = L.t("Back to image", "返回原图")
@@ -186,16 +218,16 @@ import AppKit
         copyButton.isEnabled = !busy && !textView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         switch state {
         case .idle, .recognizing:
-            statusLabel.stringValue = L.t("Recognizing text…", "正在识别文字…") + " \(Int(progress * 100))%"
+            statusLabel.stringValue = kind.progressMessage + " \(Int(progress * 100))%"
             retryButton.isHidden = true
         case .ready:
             statusLabel.stringValue = ""
             retryButton.isHidden = true
         case .empty:
-            statusLabel.stringValue = L.t("No text was found. Return to the image or try again.", "未发现可识别的文字，可返回原图或重试。")
+            statusLabel.stringValue = kind.emptyMessage
             retryButton.isHidden = false
         case .failed(let message):
-            statusLabel.stringValue = L.t("Text recognition failed: ", "文字识别失败：") + message
+            statusLabel.stringValue = kind.failurePrefix + message
             retryButton.isHidden = false
         case .closed: return
         }

@@ -96,9 +96,9 @@ enum LongScreenshotTargetValidation {
 @MainActor enum LongScreenshotTargetReadiness {
     static func prepare(target: LongScreenshotTarget, region: LongScreenshotRegion, ownProcessID: pid_t,
                         timeout: Duration = .seconds(1), interval: Duration = .milliseconds(50),
-                        snapshot: () -> LongScreenshotTargetSnapshot, handoff: () -> Void) async throws {
+                        snapshot: () async throws -> LongScreenshotTargetSnapshot, handoff: () -> Void) async throws {
         try Task.checkCancellation()
-        let initial = snapshot()
+        let initial = try await snapshot()
         var first: LongScreenshotTargetSnapshot? = initial
         var reachedTarget = false
         var handedOff = false
@@ -108,7 +108,8 @@ enum LongScreenshotTargetValidation {
             handoff()
         }
         try await wait(timeout: timeout, interval: interval) {
-            let current = first ?? snapshot()
+            let current: LongScreenshotTargetSnapshot
+            if let first { current = first } else { current = try await snapshot() }
             first = nil
             if !reachedTarget, current.frontmostProcessID == initial.frontmostProcessID,
                current.frontmostProcessID != target.processID {
@@ -132,7 +133,7 @@ enum LongScreenshotTargetValidation {
     }
 
     static func wait(timeout: Duration = .seconds(1), interval: Duration = .milliseconds(50),
-                     validate: () throws -> Void, handoff: () -> Void = {}) async throws {
+                     validate: () async throws -> Void, handoff: () -> Void = {}) async throws {
         let deadline = ContinuousClock.now.advanced(by: timeout)
         var consecutive = 0
         var handedOff = false
@@ -140,7 +141,9 @@ enum LongScreenshotTargetValidation {
         while true {
             try Task.checkCancellation()
             do {
-                try validate()
+                try await validate()
+                try Task.checkCancellation()
+                guard ContinuousClock.now < deadline else { throw lastIssue }
                 consecutive += 1
                 if consecutive >= 2 { return }
             } catch let issue as LongScreenshotTargetError {

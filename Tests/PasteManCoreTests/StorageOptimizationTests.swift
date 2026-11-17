@@ -4,6 +4,102 @@ import Testing
 @testable import PasteManCore
 
 @Suite("存储优化回归") struct StorageOptimizationTests {
+    @Test func legacyHistoryMigratesInPlaceAndKeepsTextImagesAndFavorites() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let original = try HistoryStore(directory: directory)
+        try await original.save(.text("升级前的文字与收藏"), sourceBundleID: "legacy", sourceName: "旧版来源", policy: .init())
+        try await original.save(.image(png: Data([1, 2, 3]), thumbnail: Data([4])), sourceBundleID: "legacy", sourceName: "旧版来源", policy: .init())
+        let entries = try await original.list()
+        let favorite = try #require(entries.first(where: { $0.kind == .text }))
+        let image = try #require(entries.first(where: { $0.kind == .image }))
+        try await original.setFavorite(favorite.id, value: true)
+        let before = try await original.list()
+        let database = try Database(path: directory.appendingPathComponent("history.sqlite").path)
+        try database.execute("DROP TRIGGER history_queue_image_deletion")
+        try database.execute("DROP TABLE history_image_deletions")
+        try database.execute("PRAGMA user_version = 1")
+        let migrated = try HistoryStore(directory: directory)
+        #expect(try await migrated.list() == before)
+        #expect(try await migrated.imageData(for: image.id, thumbnail: false) == Data([1, 2, 3]))
+        #expect(try database.rows("PRAGMA user_version", map: { Database.text($0, 0) }) == ["2"])
+        try await migrated.delete(image.id)
+        #expect(try await migrated.list().map(\.id) == [favorite.id])
+        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.appendingPathComponent("Images").path).isEmpty)
+    }
+
+    @Test func recoveringRepositoryUsesDatabaseCursorAndActualCleanupDeadline() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let repository = try RecoveringHistoryRepository(directory: directory)
+        let now = Date()
+        let policy = RetentionPolicy(days: 1)
+        for index in 0..<3 {
+            try await repository.save(.text("游标回归 \(index)"), sourceBundleID: "test", sourceName: "合成应用",
+                policy: policy, now: now.addingTimeInterval(-86400 + 120 + Double(index)))
+        }
+        let first = try await repository.page(search: "", filter: .all, source: nil, after: nil, limit: 1)
+        let cursor = try #require(first.next)
+        #expect(cursor.rowID > 0)
+        try await repository.delete(try #require(first.entries.first).id)
+        let second = try await repository.page(search: "", filter: .all, source: nil, after: cursor, limit: 1)
+        #expect(second.entries.first?.preview == "游标回归 1")
+        let cleanup = try await repository.nextCleanup(policy: policy, now: now)
+        #expect(abs(cleanup.timeIntervalSince(now) - 121) < 0.01)
+    }
+
+    @Test(arguments: ["delete", "clear", "prune"])
+    func failedImageRemovalIsRetriedWithoutReopeningHistory(_ operation: String) async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let images = directory.appendingPathComponent("Images")
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: images.path)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let store = try HistoryStore(directory: directory)
+        let now = Date()
+        try await store.save(.image(png: Data([1, 2]), thumbnail: Data([3])), sourceBundleID: "test", sourceName: "合成应用",
+            policy: RetentionPolicy(), now: now)
+        let entry = try #require(try await store.list().first)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: images.path)
+        await #expect(throws: (any Error).self) {
+            switch operation {
+            case "delete": try await store.delete(entry.id)
+            case "clear": try await store.clear(includingFavorites: true)
+            default: try await store.prune(policy: RetentionPolicy(days: 1), now: now.addingTimeInterval(2 * 86400))
+            }
+        }
+        #expect(try await store.list().isEmpty)
+        let database = try Database(path: directory.appendingPathComponent("history.sqlite").path)
+        #expect(try database.rows("SELECT id FROM history_image_deletions", map: { Database.text($0, 0) }) == [entry.id.uuidString])
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: images.path)
+        let cleaned = try await store.pruneIfNeeded(policy: RetentionPolicy(), now: now)
+        #expect(cleaned)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: images.path).isEmpty)
+        let unchanged = try await store.pruneIfNeeded(policy: RetentionPolicy(), now: now)
+        #expect(!unchanged)
+    }
+
+    @Test func pendingImageCleanupSurvivesReopenAndExplicitRepositoryRetry() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let images = directory.appendingPathComponent("Images")
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: images.path)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let store = try HistoryStore(directory: directory)
+        try await store.save(.image(png: Data([1]), thumbnail: Data([2])), sourceBundleID: "test", sourceName: "合成应用", policy: .init())
+        let entry = try #require(try await store.list().first)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: images.path)
+        await #expect(throws: StoreError.imageCleanupPending) { try await store.delete(entry.id) }
+        let repository = try RecoveringHistoryRepository(directory: directory)
+        #expect(try await repository.list(search: "", filter: .all, source: nil).isEmpty)
+        await #expect(throws: StoreError.imageCleanupPending) { try await repository.retry() }
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: images.path)
+        try await repository.retry()
+        #expect(try FileManager.default.contentsOfDirectory(atPath: images.path).isEmpty)
+    }
+
     @Test func unusedRepositoryDoesNotCreateStorageAndConcurrentFirstAccessSharesOpen() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

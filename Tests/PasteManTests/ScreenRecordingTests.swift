@@ -50,11 +50,16 @@ import Testing
 
 private actor RecordingTestExporter: ScreenRecordingExporting {
     var shouldFail = false
+    var damaged: URL?
     var calls: [[URL]] = []
     func setFailure(_ value: Bool) { shouldFail = value }
+    func setDamaged(_ value: URL) { damaged = value }
     func export(segments: [URL], directory: URL, progress: @escaping @Sendable (Double) -> Void) async throws -> URL {
         calls.append(segments)
         if shouldFail { throw ScreenRecordingError.outputDirectory }
+        if let damaged, segments.contains(damaged) {
+            throw ScreenRecordingRecoveryError(playable: segments.filter { $0 != damaged }, damaged: [damaged])
+        }
         guard !segments.isEmpty else { throw ScreenRecordingError.empty }
         let url = directory.deletingLastPathComponent().appendingPathComponent(UUID().uuidString + ".mp4")
         try Data("saved recording".utf8).write(to: url)
@@ -520,6 +525,51 @@ private actor RecordingTestExporter: ScreenRecordingExporting {
         f.coordinator.recover(directory)
         #expect(f.coordinator.phase == .idle && f.coordinator.pendingRecoveries.isEmpty)
         #expect(!FileManager.default.fileExists(atPath: directory.path))
+    }
+
+    @Test func explicitPartialRecoverySavesPlayableSegmentsAndKeepsEveryOriginal() async throws {
+        let f = try RecordingFixture(); defer { f.clean() }
+        await f.start()
+        f.coordinator.togglePause()
+        await wait { f.coordinator.phase == .paused }
+        let first = try #require(f.coordinator.segments.first)
+        f.coordinator.togglePause()
+        await wait { f.coordinator.phase == .recording }
+        let directory = try #require(f.coordinator.sessionDirectory)
+        let damaged = directory.appendingPathComponent("segment-000001.mp4")
+        await f.exporter.setDamaged(damaged)
+        f.coordinator.stop()
+        await wait { f.coordinator.phase == .failed }
+        #expect(f.coordinator.playableRecoverySegments == [first])
+        #expect(f.coordinator.savedURL == nil)
+        let originals = try [first, damaged].map { try Data(contentsOf: $0) }
+        f.coordinator.savePlayableSegments()
+        f.coordinator.savePlayableSegments()
+        await wait { f.coordinator.phase == .idle }
+        #expect(f.coordinator.savedURL != nil)
+        #expect(f.coordinator.pendingRecoveries == [directory])
+        #expect(try [first, damaged].map { try Data(contentsOf: $0) } == originals)
+        #expect(await f.exporter.calls == [[first, damaged], [first]])
+    }
+
+    @Test func unreadableRecoveryKeepsItsEntryAndCanRetryWhenAccessReturns() async throws {
+        let f = try RecordingFixture(); defer { f.clean() }
+        let directory = f.root.appendingPathComponent(".easymacos-recording-unreadable", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let segment = directory.appendingPathComponent("segment-000000.mp4")
+        let bytes = Data("必须保留的合成片段".utf8)
+        try bytes.write(to: segment)
+        f.defaults.set([directory.path], forKey: "screenRecordingRecoveries")
+        try FileManager.default.setAttributes([.posixPermissions: 0o300], ofItemAtPath: directory.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path) }
+        f.coordinator.recover(directory)
+        #expect(f.coordinator.phase == .failed)
+        #expect(f.coordinator.pendingRecoveries == [directory])
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        #expect(try Data(contentsOf: segment) == bytes)
+        f.coordinator.retrySave()
+        await wait { f.coordinator.phase == .idle }
+        #expect(f.coordinator.savedURL != nil && f.coordinator.pendingRecoveries.isEmpty)
     }
 
     @Test func invalidDirectoryAndDeniedPermissionDoNotCapture() async throws {

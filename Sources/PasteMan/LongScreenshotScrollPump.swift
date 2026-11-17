@@ -3,6 +3,7 @@ import Foundation
 /// 滚动独立于图像匹配；未确认的距离达到预算时暂停，保证仍有足够重叠。
 @MainActor final class LongScreenshotScrollPump {
     var paused = false
+    var validationPending = false
     private(set) var failure: Error?
     private(set) var pendingPoints: CGFloat = 0
     let maximumPendingPoints: CGFloat
@@ -23,7 +24,7 @@ import Foundation
                     try await Task.sleep(for: .milliseconds(16))
                     try Task.checkCancellation()
                     guard let self else { return }
-                    if !self.paused, self.pendingPoints + CGFloat(self.step) <= self.maximumPendingPoints {
+                    if !self.paused, !self.validationPending, self.pendingPoints + CGFloat(self.step) <= self.maximumPendingPoints {
                         try self.send(self.step)
                         self.pendingPoints += CGFloat(self.step)
                     }

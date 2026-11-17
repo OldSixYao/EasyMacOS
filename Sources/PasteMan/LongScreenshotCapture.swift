@@ -40,7 +40,7 @@ extension LongScreenshotCapturing { var capturesContinuously: Bool { false } }
 @MainActor protocol LongScreenshotScrolling {
     func resolve(_ region: LongScreenshotRegion) throws -> LongScreenshotTarget
     func prepare(_ target: LongScreenshotTarget, region: LongScreenshotRegion) async throws
-    func validate(_ target: LongScreenshotTarget, region: LongScreenshotRegion) throws
+    func validate(_ target: LongScreenshotTarget, region: LongScreenshotRegion) async throws
     func scroll(_ points: Int, target: LongScreenshotTarget, region: LongScreenshotRegion) throws
     func scrollStep(_ points: Int, target: LongScreenshotTarget, region: LongScreenshotRegion) throws
 }
@@ -50,150 +50,7 @@ extension LongScreenshotScrolling {
         try scroll(points, target: target, region: region)
     }
     func prepare(_ target: LongScreenshotTarget, region: LongScreenshotRegion) async throws {
-        try validate(target, region: region)
-    }
-}
-
-@MainActor struct SystemLongScreenshotScroll: LongScreenshotScrolling {
-    private let hitTest: (AXUIElement, CGPoint) -> AXUIElement?
-
-    init(hitTest: @escaping (AXUIElement, CGPoint) -> AXUIElement? = { root, point in
-        var element: AXUIElement?
-        guard AXUIElementCopyElementAtPosition(root, Float(point.x), Float(point.y), &element) == .success else { return nil }
-        return element
-    }) {
-        self.hitTest = hitTest
-    }
-
-    private func windows() -> [[String: Any]] {
-        (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? [])
-            .filter { ($0[kCGWindowOwnerPID as String] as? pid_t) != ProcessInfo.processInfo.processIdentifier
-                && ($0[kCGWindowLayer as String] as? Int) == 0
-                && ($0[kCGWindowAlpha as String] as? Double ?? 1) > 0 }
-    }
-    private func frame(_ window: [String: Any]) -> CGRect? {
-        guard let bounds = window[kCGWindowBounds as String] as? NSDictionary else { return nil }
-        return CGRect(dictionaryRepresentation: bounds)
-    }
-    func resolve(_ region: LongScreenshotRegion) throws -> LongScreenshotTarget {
-        let center = CGPoint(x: region.quartzRect.midX, y: region.quartzRect.midY)
-        guard region.selection.width >= 80, region.selection.height >= 80,
-            CGRect(origin: .zero, size: region.screen.frame.size).contains(region.selection),
-            let window = windows().first(where: { frame($0)?.contains(center) == true }),
-            (window[kCGWindowLayer as String] as? Int) == 0,
-            let bounds = frame(window), bounds.contains(region.quartzRect),
-            let id = window[kCGWindowNumber as String] as? CGWindowID,
-            let pid = window[kCGWindowOwnerPID as String] as? pid_t,
-            let app = NSRunningApplication(processIdentifier: pid)
-        else { throw LongScreenshotError.selection }
-        let target = LongScreenshotTarget(windowID: id, processID: pid, frame: bounds,
-            sourceID: app.bundleIdentifier ?? "unknown", sourceName: app.localizedName ?? L.unknownApp)
-        return target
-    }
-    func prepare(_ target: LongScreenshotTarget, region: LongScreenshotRegion) async throws {
-        try await LongScreenshotTargetReadiness.prepare(target: target, region: region,
-            ownProcessID: ProcessInfo.processInfo.processIdentifier) {
-            snapshot(target, region: region)
-        } handoff: {
-            guard let app = NSRunningApplication(processIdentifier: target.processID), !app.isTerminated else { return }
-            NSApp.yieldActivation(to: app)
-            app.activate(from: .current, options: [])
-        }
-    }
-    func validate(_ target: LongScreenshotTarget, region: LongScreenshotRegion) throws {
-        try LongScreenshotTargetValidation.validate(snapshot(target, region: region), target: target, region: region,
-            ownProcessID: ProcessInfo.processInfo.processIdentifier)
-    }
-
-    private func snapshot(_ target: LongScreenshotTarget, region: LongScreenshotRegion) -> LongScreenshotTargetSnapshot {
-        guard CGPreflightScreenCaptureAccess() && AXIsProcessTrusted() && CGPreflightPostEventAccess() else {
-            return windowSnapshot(target, region: region)
-        }
-        // 部分正常前台应用会让系统级 AXFocusedApplication 持续返回无法完成或无值。
-        // 使用工作空间的前台进程身份，再直接检查该进程窗口；接口缺值不能当成焦点丢失。
-        let application = AXUIElementCreateApplication(target.processID)
-        AXUIElementSetMessagingTimeout(application, 0.2)
-        var focusedFrame: CGRect?
-        if NSWorkspace.shared.frontmostApplication?.processIdentifier == target.processID {
-            var focusedWindow: CFTypeRef?
-            if AXUIElementCopyAttributeValue(application, kAXFocusedWindowAttribute as CFString, &focusedWindow) == .success,
-               let focusedWindow, CFGetTypeID(focusedWindow) == AXUIElementGetTypeID() {
-                focusedFrame = accessibilityFrame(unsafeDowncast(focusedWindow, to: AXUIElement.self))
-            }
-        }
-        // 辅助功能命中测试穿过系统的透明覆盖窗口，也能发现选区中心的弹出菜单与对话框。
-        let system = AXUIElementCreateSystemWide()
-        AXUIElementSetMessagingTimeout(system, 0.2)
-        let point = CGPoint(x: region.quartzRect.midX, y: region.quartzRect.midY)
-        var element = hitTest(system, point)
-        if element == nil {
-            // 系统级接口可能单独失效，直接询问目标应用补充命中信息。
-            element = hitTest(application, point)
-        }
-        var pid: pid_t = 0
-        var hitPID: pid_t?
-        var hitFrame: CGRect?
-        if let element, AXUIElementGetPid(element, &pid) == .success {
-            hitPID = pid
-            var windowValue: CFTypeRef?
-            if pid == target.processID,
-               AXUIElementCopyAttributeValue(element, kAXWindowAttribute as CFString, &windowValue) == .success,
-               let windowValue, CFGetTypeID(windowValue) == AXUIElementGetTypeID() {
-                hitFrame = accessibilityFrame(unsafeDowncast(windowValue, to: AXUIElement.self))
-            }
-        }
-        // 跨进程查询返回后重新核验窗口和前台状态，不能据查询前的旧状态继续采集。
-        var snapshot = windowSnapshot(target, region: region)
-        snapshot.focusedWindowFrame = focusedFrame
-        snapshot.hitProcessID = hitPID
-        snapshot.hitWindowFrame = hitFrame
-        return snapshot
-    }
-    private func windowSnapshot(_ target: LongScreenshotTarget, region: LongScreenshotRegion) -> LongScreenshotTargetSnapshot {
-        let windows = windows()
-        return LongScreenshotTargetSnapshot(
-            hasPermission: CGPreflightScreenCaptureAccess() && AXIsProcessTrusted() && CGPreflightPostEventAccess(),
-            targetWindow: windows.first { $0[kCGWindowNumber as String] as? CGWindowID == target.windowID }.flatMap(identity),
-            topWindow: windows.first { frame($0)?.intersects(region.quartzRect) == true }.flatMap(identity),
-            frontmostProcessID: NSWorkspace.shared.frontmostApplication?.processIdentifier)
-    }
-    private func accessibilityFrame(_ window: AXUIElement) -> CGRect? {
-        AXUIElementSetMessagingTimeout(window, 0.2)
-        var position: CFTypeRef?, size: CFTypeRef?
-        var origin = CGPoint.zero, dimensions = CGSize.zero
-        guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &position) == .success,
-            AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &size) == .success,
-            let position, let size, CFGetTypeID(position) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID(),
-            AXValueGetValue(unsafeDowncast(position, to: AXValue.self), .cgPoint, &origin),
-            AXValueGetValue(unsafeDowncast(size, to: AXValue.self), .cgSize, &dimensions)
-        else { return nil }
-        return CGRect(origin: origin, size: dimensions)
-    }
-    func scroll(_ points: Int, target: LongScreenshotTarget, region: LongScreenshotRegion) throws {
-        try Task.checkCancellation()
-        try validate(target, region: region)
-        try post(points, target: target, region: region)
-    }
-    func scrollStep(_ points: Int, target: LongScreenshotTarget, region: LongScreenshotRegion) throws {
-        try Task.checkCancellation()
-        // 高频小步只读窗口服务器和前台身份；完整辅助功能命中由取帧循环持续复核。
-        // 不在每个刷新周期内发起多次跨进程辅助功能请求。
-        try LongScreenshotTargetValidation.validateWindow(windowSnapshot(target, region: region), target: target, region: region,
-            ownProcessID: ProcessInfo.processInfo.processIdentifier)
-        try post(points, target: target, region: region)
-    }
-    private func identity(_ window: [String: Any]) -> LongScreenshotWindowIdentity? {
-        guard let id = window[kCGWindowNumber as String] as? CGWindowID,
-            let pid = window[kCGWindowOwnerPID as String] as? pid_t, let frame = frame(window) else { return nil }
-        return LongScreenshotWindowIdentity(id: id, processID: pid, frame: frame)
-    }
-    private func post(_ points: Int, target: LongScreenshotTarget, region: LongScreenshotRegion) throws {
-        let amount = min(max(1, points), max(1, Int(region.selection.height / 3)))
-        let location = CGPoint(x: region.quartzRect.midX, y: region.quartzRect.midY)
-        guard let event = LongScreenshotScrollEvent.make(amount: amount, target: target,
-            location: location) else { throw LongScreenshotError.scrollUnavailable }
-        // 定向投递不更新系统指针位置；事件自带目标窗口及窗口内坐标。
-        event.postToPid(target.processID)
+        try await validate(target, region: region)
     }
 }
 
@@ -288,12 +145,12 @@ extension LongScreenshotScrolling {
                 try await LongScreenshotOperation.run(timeout: self.captureTimeout) { [capture = self.capture] in
                     try await capture.prepare(region)
                 }
-                try self.check(version, target: target, region: region, deadline: deadline)
+                try await self.check(version, target: target, region: region, deadline: deadline)
                 // 冻结选区已经关闭，从当前真实画面重新建立第一帧。
                 let first = try await self.stableFrame(version, target: target, region: region, deadline: deadline)
-                try self.check(version, target: target, region: region, deadline: deadline)
+                try await self.check(version, target: target, region: region, deadline: deadline)
                 var progress = try await stitcher.append(first)
-                try self.check(version, target: target, region: region, deadline: deadline)
+                try await self.check(version, target: target, region: region, deadline: deadline)
                 self.phase = .capturing; self.onProgress?(progress)
                 if self.capture.capturesContinuously {
                     progress = try await self.captureContinuously(stitcher, progress: progress, version: version,
@@ -301,12 +158,12 @@ extension LongScreenshotScrolling {
                 } else {
                     var unchanged = 0
                     while !progress.reachedLimit {
-                        try self.check(version, target: target, region: region, deadline: deadline)
+                        try await self.check(version, target: target, region: region, deadline: deadline)
                         try self.scroll.scroll(max(1, Int(region.selection.height / 4)), target: target, region: region)
                         try await Task.sleep(for: self.settleInterval)
                         progress = try await self.appendNextFrame(stitcher, version: version, target: target,
                             region: region, deadline: deadline)
-                        try self.check(version, target: target, region: region, deadline: deadline)
+                        try await self.check(version, target: target, region: region, deadline: deadline)
                         self.onProgress?(progress)
                         unchanged = progress.added == 0 ? unchanged + 1 : 0
                         if unchanged >= 3 { break }
@@ -339,24 +196,30 @@ extension LongScreenshotScrolling {
     }
 
     private func check(_ version: Int, target: LongScreenshotTarget, region: LongScreenshotRegion,
-                       deadline: ContinuousClock.Instant) throws {
+                       deadline: ContinuousClock.Instant) async throws {
         try Task.checkCancellation()
         guard generation == version, phase != .idle, phase != .stopping else { throw CancellationError() }
         guard ContinuousClock.now < deadline else { throw LongScreenshotError.timeout }
-        try scroll.validate(target, region: region)
+        let pump = scrollPump
+        pump?.validationPending = true
+        defer { pump?.validationPending = false }
+        try await scroll.validate(target, region: region)
+        try Task.checkCancellation()
+        guard generation == version, phase != .idle, phase != .stopping else { throw CancellationError() }
+        guard ContinuousClock.now < deadline else { throw LongScreenshotError.timeout }
     }
 
     private func stableFrame(_ version: Int, target: LongScreenshotTarget, region: LongScreenshotRegion,
                              deadline: ContinuousClock.Instant) async throws -> CGImage {
         var previous: LongScreenshotFeatures?
         for _ in 0..<10 {
-            try check(version, target: target, region: region, deadline: deadline)
+            try await check(version, target: target, region: region, deadline: deadline)
             let image = try await LongScreenshotOperation.run(timeout: captureTimeout) { [capture] in
                 try await capture.capture()
             }
-            try check(version, target: target, region: region, deadline: deadline)
+            try await check(version, target: target, region: region, deadline: deadline)
             let features = try await LongScreenshotFeatureWorker.shared.features(image)
-            try check(version, target: target, region: region, deadline: deadline)
+            try await check(version, target: target, region: region, deadline: deadline)
             if let previous, previous.isStable(comparedTo: features) { return image }
             previous = features
             try await Task.sleep(for: settleInterval)
@@ -368,7 +231,7 @@ extension LongScreenshotScrolling {
                                  region: LongScreenshotRegion, deadline: ContinuousClock.Instant) async throws -> LongScreenshotStitcher.Progress {
         for attempt in 0..<3 {
             let image = try await stableFrame(version, target: target, region: region, deadline: deadline)
-            try check(version, target: target, region: region, deadline: deadline)
+            try await check(version, target: target, region: region, deadline: deadline)
             do { return try await stitcher.append(image) }
             catch LongScreenshotError.overlap where attempt < 2 {
                 // 虚拟列表、图片懒加载和悬停预览可能晚于滚动稳定。
@@ -394,7 +257,7 @@ extension LongScreenshotScrolling {
         var unchanged = 0
         while !progress.reachedLimit {
             try await Task.sleep(for: .milliseconds(80))
-            try check(version, target: target, region: region, deadline: deadline)
+            try await check(version, target: target, region: region, deadline: deadline)
             if let error = pump.failure { throw error }
             let image = try await LongScreenshotOperation.run(timeout: captureTimeout) { [capture] in
                 try await capture.capture()
@@ -409,7 +272,7 @@ extension LongScreenshotScrolling {
                 if let mismatchSince, mismatchSince.duration(to: .now) >= .milliseconds(1200) { throw LongScreenshotError.overlap }
                 continue
             }
-            try check(version, target: target, region: region, deadline: deadline)
+            try await check(version, target: target, region: region, deadline: deadline)
             if progress.added > 0 {
                 pump.acknowledge(CGFloat(progress.added) / region.screen.scale)
                 lastAddition = .now; unchanged = 0; mismatchSince = nil; pump.paused = false

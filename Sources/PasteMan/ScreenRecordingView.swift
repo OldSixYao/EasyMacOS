@@ -590,11 +590,15 @@ struct ScreenRecordingControls: View {
         VStack(spacing: 10) {
             Text(coordinator.errorMessage ?? "").font(.caption).lineLimit(3)
             HStack {
-                if !coordinator.segments.isEmpty { Button(L.t("Retry saving", "重试保存")) { coordinator.retrySave() } }
+                if coordinator.sessionDirectory != nil { Button(L.t("Retry saving", "重试保存")) { coordinator.retrySave() } }
                 if let folder = coordinator.sessionDirectory {
                     Button(L.t("Show segments", "定位片段")) { NSWorkspace.shared.open(folder) }
                 }
                 Button(L.t("Keep and close", "保留并关闭")) { coordinator.keepForRecovery(); close() }
+            }
+            if !coordinator.playableRecoverySegments.isEmpty {
+                Button(L.t("Save playable segments", "保存可用片段")) { coordinator.savePlayableSegments() }
+                    .accessibilityIdentifier("recording.savePlayableSegments")
             }
         }.padding(12)
     }

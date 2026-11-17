@@ -59,6 +59,9 @@ enum L {
             return t("Image skipped: maximum 20 MiB / 40 million pixels.", "已跳过图片：上限为 20 MiB / 4000 万像素。")
         case .unsupportedVersion:
             return t("This history requires a newer version of EasyMacOS.", "此历史数据库需要更新版本的 EasyMacOS。")
+        case .imageCleanupPending:
+            return t("History entries were deleted. Some image files could not be removed; restore storage access and retry cleanup.",
+                "历史记录已删除，部分图片文件尚未清理；请恢复存储权限后重试，自动清理也会继续尝试。")
         case .database:
             return t(
                 "History database unavailable. Your existing data has been preserved. Check storage access and available space, then retry.",

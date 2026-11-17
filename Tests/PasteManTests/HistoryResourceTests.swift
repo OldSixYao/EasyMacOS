@@ -6,6 +6,40 @@ import Testing
 @testable import PasteMan
 
 @Suite("历史后台资源回收", .serialized) @MainActor struct HistoryResourceTests {
+    @Test func failedImageCleanupRefreshesDeletedRowsAndRequestsBackgroundRetry() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let images = directory.appendingPathComponent("Images")
+        let suite = "HistoryCleanup." + UUID().uuidString
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        let keys = HotKeyService()
+        defer {
+            keys.stop()
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: images.path)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let repository = try RecoveringHistoryRepository(directory: directory)
+        try await repository.save(.image(png: Data([1]), thumbnail: Data([2])), sourceBundleID: "test", sourceName: "合成应用", policy: .init(), now: Date())
+        let model = AppModel(repository: repository, settings: AppSettings(defaults: defaults), permissions: PermissionService(),
+            hotKeys: keys, finderModel: FinderModel(store: FinderConfigurationStore(url: directory.appendingPathComponent("finder.json"))))
+        defer { model.suspendClipboard() }
+        var retries = 0
+        model.onCleanupNeeded = { retries += 1 }
+        model.panelVisible = true
+        model.refresh()
+        try await wait { !model.loading }
+        let entry = try #require(model.entries.first)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: images.path)
+        model.delete(entry)
+        try await wait { model.message != nil && !model.loading && model.entries.isEmpty }
+        #expect(retries == 1)
+        #expect(model.message == L.error(StoreError.imageCleanupPending))
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: images.path)
+        model.retryHistory()
+        try await wait { model.message == nil }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: images.path).isEmpty)
+    }
+
     @Test func hiddenHistoryKeepsOnlyFirstPageThenExpiresAndReopens() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let suite = "HistoryResources." + UUID().uuidString

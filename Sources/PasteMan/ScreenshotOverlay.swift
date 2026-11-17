@@ -29,7 +29,7 @@ import SwiftUI
 enum ScreenshotEditorAction {
     case tool(AnnotationTool)
     case preview(ScreenshotPreviewMode)
-    case undo, redo, reselect, longScreenshot, recognizeText, confirm, copy, save, pin, cancel
+    case undo, redo, reselect, longScreenshot, recognizeText, recognizeBarcodes, confirm, copy, save, pin, cancel
 }
 
 enum ScreenshotPreviewMode: String, CaseIterable {
@@ -59,8 +59,9 @@ enum ScreenshotPreviewMode: String, CaseIterable {
 
 struct ScreenshotToolbar: View {
     @Bindable var state: ScreenshotEditorState
-    static let width: CGFloat = 528
+    static let width: CGFloat = 564
     static let scrollingScreenshotSymbol = "arrow.down.doc"
+    static let barcodeRecognitionSymbol = "qrcode.viewfinder"
     static let tint = Color(red: 0, green: 0.76, blue: 0.48)
 
     var body: some View {
@@ -97,6 +98,8 @@ struct ScreenshotToolbar: View {
                 separator
                 action("text.viewfinder", title: L.t("Recognize text", "识别文字"), action: .recognizeText)
                     .accessibilityIdentifier("screenshot.recognizeText")
+                action(Self.barcodeRecognitionSymbol, title: ScreenshotRecognitionKind.barcodes.title, action: .recognizeBarcodes)
+                    .accessibilityIdentifier("screenshot.recognizeBarcodes")
                 action("square.and.arrow.down", title: L.t("Save PNG…", "保存 PNG…"), action: .save)
                 action("pin", title: L.t("Pin to desktop", "钉在桌面"), action: .pin)
                 action("xmark", title: L.t("Cancel Esc", "取消 Esc"), action: .cancel, color: .red)
@@ -641,6 +644,7 @@ private struct ScreenshotHoverFeedback: ViewModifier {
         case .reselect: coordinator?.reselect()
         case .longScreenshot: coordinator?.startLongScreenshot(from: self)
         case .recognizeText: coordinator?.recognizeText(from: self)
+        case .recognizeBarcodes: coordinator?.recognizeText(from: self, kind: .barcodes)
         case .confirm:
             if state.confirmsLongScreenshot { coordinator?.startLongScreenshot(from: self) }
             else { coordinator?.finish(.copy, from: self) }

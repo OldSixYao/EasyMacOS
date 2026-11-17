@@ -12,6 +12,7 @@ import PasteManCore
     private let previewContainer = LongScreenshotPreviewContainer()
     var onOutput: ((ScreenshotCoordinator.Output) -> Void)?
     var onRecognizeText: (() -> Void)?
+    var onRecognizeBarcodes: (() -> Void)?
     var onClose: (() -> Void)?
     private var header: NSHostingView<LongScreenshotEditorHeader>?
     private var boundsObserver: NSObjectProtocol?
@@ -78,6 +79,7 @@ import PasteManCore
     }
     func close() {
         onRecognizeText = nil
+        onRecognizeBarcodes = nil
         if let boundsObserver { NotificationCenter.default.removeObserver(boundsObserver) }
         boundsObserver = nil
         canvas.dispose()
@@ -156,6 +158,7 @@ import PasteManCore
         case .save: onOutput?(.save)
         case .pin: onOutput?(.pin)
         case .recognizeText: onRecognizeText?()
+        case .recognizeBarcodes: onRecognizeBarcodes?()
         case .cancel: onClose?()
         case .reselect, .longScreenshot: break
         }

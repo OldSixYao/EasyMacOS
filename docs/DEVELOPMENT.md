@@ -16,6 +16,8 @@
 
 默认保存到 `~/Movies/EasyMacOS/`。当前会话片段位于目标目录中以 `.easymacos-recording-` 开头的专属隐藏目录，完成后发布最终视频并清理对应片段；失败时保留原片段，错误界面提供重试与定位。关闭错误界面保留恢复记录，菜单栏可重新进入恢复，重启后也会显示待恢复会话。不要在恢复成功前手动删除片段目录。
 
+目录枚举失败与确认为空分别处理：暂时无访问权限时保留目录和恢复入口，恢复权限后可直接点击“重试保存”。有片段损坏时不会自动跳过，先提示并提供“保存可用片段”；确认该操作后只合并可播放的片段，全部原件和恢复入口继续保留，以便进一步修复。没有可用片段时仍可定位目录或保留并关闭。
+
 锁屏、休眠、显示配置变化和模块关闭会结束当前录制并保存；退出应用会等待保存。保存失败时取消退出，需先重试保存，或选择“保留并关闭”后再退出。
 
 常规测试使用替身采集服务与合成音画，不请求系统权限。实机检查须由已获屏幕录制权限的调用进程运行，生成的视频仅保留在本机：
@@ -68,7 +70,7 @@ swift scripts/recording-smoke.swift
 PASTEMAN_RENDER_TESTS=1 ./scripts/test.sh --filter RenderingTests
 ```
 
-A native, local-only clipboard history and screenshot app for **Apple Silicon · macOS 15+**. Built with SwiftUI, AppKit, and the system SQLite library. No third-party runtime dependencies, cloud sync, analytics, or automatic updater.
+应用面向 Apple Silicon 与 macOS 15 或更新系统，使用 SwiftUI、AppKit 和系统 SQLite 构建。更新功能使用固定版本的 Sparkle，仅在用户主动检查时连接更新服务；内容存储在本机，不提供云同步或使用追踪。
 
 ## Build and run
 
@@ -125,11 +127,19 @@ The build script selects SwiftPM's native build engine because the current CLT 2
 
 截图保存任务覆盖图片准备、数据库打开和写锁等待；暂停、关闭记录、清空历史或会话锁定后，尚未提交的保存会取消。历史清理遇到存储故障时按一至六十秒递增间隔重试，恢复后继续清理过期记录；停用剪贴板或会话暂停会取消重试。访达剪切状态损坏时，重新剪切会重建状态，独立命令编号保持递增。
 
+调整剪贴板应用排除名单同样取消待保存任务并重建监控基线，不会在移除排除后补录旧内容。数据库取得写锁后仍检查任务取消，避免排除变更发生在数据库等待期间时保存旧内容。
+
+图片删除通过数据库事务登记待清理标识，文件删除失败不会遗失重试记录。界面按数据库实际结果刷新，并提示图片清理尚未完成；后台清理或“重试”会继续处理，重启后同样保留任务。数据库格式升级为第二版，旧记录和收藏在原库迁移；发布应用必须使用支持该格式的源码构建。
+
 以下回归使用独立偏好、临时数据库、命名剪贴板及合成图片，不读取真实历史、控制访达或采集屏幕：
 
 ```sh
 ./scripts/test.sh --filter 'ClipboardLifecycleTests|QueryCancellationTests|ScreenRecordingTests|FinderCutClipboardTests|FinderMoveTests'
+./scripts/test.sh --filter 'StorageOptimizationTests|HistoryResourceTests|ScreenRecordingExportTests'
+./scripts/test.sh --filter 'ScreenshotTextRecognitionTests|ScreenshotBarcodeRecognitionTests|LongScreenshotAccessibilityTests'
 ```
+
+长图文字按纵向位置建立查重索引，只比较相交区域，保留同一位置较完整的识别结果及其他位置的重复文字。条码在原尺寸分段检测之外，先用有尺寸限制的整图预览定位跨分段的大码，再按候选区域的原始像素解码；两个阶段都包含当前标注。长截屏的辅助功能查询使用专用串行后台队列，校验等待期间暂停自动滚动，返回后重新核验窗口、前台身份和权限；超时或取消后丢弃迟到结果。
 
 ## Screenshots and pinned images
 
@@ -166,6 +176,20 @@ Screen capture has a separate working-memory guard (100 million pixels across ca
 ./scripts/test.sh --filter ScreenshotText
 ./scripts/test.sh --filter LongScreenshotOutputTests
 PASTEMAN_RENDER_TESTS=1 ./scripts/test.sh --filter RenderingTests
+```
+
+## 截图条形码与二维码识别
+
+普通截图框选完整码图后，在工具栏点击“识别条码/二维码”；长图编辑器提供相同按钮，桌面钉图在右键菜单选择该项。识别使用系统原生视觉框架，在本机检测当前系统支持的全部码制，包括二维码和常见一维条形码，无需联网或额外授权。码图应包含完整图案及四周留白。
+
+结果窗口按原图从上到下、同一高度从左到右显示各个码的原始文本内容，以换行分隔，不附加标题或自动打开链接。可选择复制、编辑后复制或复制全部；复制全部成功结束普通截图或长图编辑，钉图继续保留。返回原图、失败重试、剪贴板来源及记录策略与文字识别共用。
+
+识别使用框选区域或完整长图、钉图的原始像素，并应用已提交标注。长图分段最高四千零九十六像素，窄图按宽度缩短分段，相邻分段保留一半重叠以覆盖常见跨边界码图。只合并同一位置、相同原始内容的重复检测，保留不同位置的相同码；不会像文字排版一样合并空白字符。关闭结果、取消截图或关闭钉图会取消系统请求并丢弃迟到结果。
+
+以下检查使用本机生成的合成码图与模拟服务，不采集真实屏幕或访问真实剪贴板：
+
+```sh
+./scripts/test.sh --filter 'ScreenshotBarcode|ScreenshotText|ScreenshotIntegrationTests|LongScreenshotOutputTests'
 ```
 
 ## 自动滚动长截屏

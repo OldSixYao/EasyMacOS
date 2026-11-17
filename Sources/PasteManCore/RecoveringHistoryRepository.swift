@@ -28,7 +28,7 @@ public actor RecoveringHistoryRepository: HistoryRepository {
         if let opening, case .failure = await opening.result, revision == openingRevision {
             self.opening = nil
         }
-        _ = try await store()
+        try await store().retry()
     }
     public func list(search: String, filter: HistoryFilter, source: String?) async throws -> [HistoryEntry] {
         try await store().list(search: search, filter: filter, source: source)

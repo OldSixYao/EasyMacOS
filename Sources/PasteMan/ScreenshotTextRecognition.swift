@@ -17,6 +17,7 @@ struct ScreenshotTextLine: Sendable {
     /// 原图像素坐标，原点在左上角。
     let rect: CGRect
     let confidence: Float
+    var clipped = false
 }
 
 enum ScreenshotTextLayout {
@@ -39,19 +40,9 @@ enum ScreenshotTextLayout {
     }
 
     static func merge(_ additions: [ScreenshotTextLine], into lines: inout [ScreenshotTextLine]) {
-        for line in additions {
-            let key = line.text.filter { !$0.isWhitespace }
-            guard !key.isEmpty else { continue }
-            if let index = lines.lastIndex(where: { existing in
-                let intersection = existing.rect.intersection(line.rect)
-                guard !intersection.isNull else { return false }
-                let smaller = min(existing.rect.width * existing.rect.height, line.rect.width * line.rect.height)
-                return smaller > 0 && intersection.width * intersection.height >= smaller * 0.5
-                    && existing.text.filter { !$0.isWhitespace } == key
-            }) {
-                if line.confidence > lines[index].confidence { lines[index] = line }
-            } else { lines.append(line) }
-        }
+        var accumulator = ScreenshotTextAccumulator(lines: lines)
+        accumulator.append(additions)
+        lines = accumulator.lines
     }
 
     static func text(from lines: [ScreenshotTextLine]) -> String {
@@ -72,14 +63,14 @@ enum ScreenshotTextLayout {
 }
 
 /// 系统请求允许从其他线程取消；锁内发布请求，覆盖取消早于请求创建的情况。
-private final class ScreenshotTextCancellation: Sendable {
+final class ScreenshotRecognitionCancellation: Sendable {
     private struct State {
         var cancelled = false
-        var request: VNRecognizeTextRequest?
+        var request: VNRequest?
     }
     private let state = OSAllocatedUnfairLock(uncheckedState: State())
 
-    func install(_ request: VNRecognizeTextRequest) throws {
+    func install(_ request: VNRequest) throws {
         try state.withLockUnchecked { state in
             guard !state.cancelled else { throw CancellationError() }
             state.request = request
@@ -99,44 +90,32 @@ actor SystemScreenshotTextRecognizer: ScreenshotTextRecognizing {
     static let shared = SystemScreenshotTextRecognizer()
 
     func recognize(_ input: ScreenshotTextInput, progress: @escaping @Sendable (Double) -> Void) async throws -> String {
-        let cancellation = ScreenshotTextCancellation()
+        let cancellation = ScreenshotRecognitionCancellation()
         return try await withTaskCancellationHandler {
             try Task.checkCancellation()
-            let base: CGImage
-            let pointSize: CGSize
-            let annotations: [ScreenshotAnnotation]
-            switch input {
-            case .image(let image, let size, let marks):
-                base = image; pointSize = size; annotations = marks
-            case .pinned(let storage):
-                base = try await storage.loadImage(); pointSize = storage.pointSize; annotations = []
-            }
-            guard base.width > 0, base.height > 0, base.width <= 100_000_000 / base.height,
-                pointSize.width.isFinite, pointSize.height.isFinite, pointSize.width > 0, pointSize.height > 0
-            else { throw ScreenshotImageError.allocationFailed }
-            let strips = ScreenshotTextLayout.strips(width: base.width, height: base.height)
-            var lines: [ScreenshotTextLine] = []
+            let source = try await ScreenshotRecognitionImage.load(input)
+            let strips = ScreenshotTextLayout.strips(width: source.base.width, height: source.base.height)
+            var lines = ScreenshotTextAccumulator()
             for (index, strip) in strips.enumerated() {
                 try Task.checkCancellation()
                 let cost = Int(strip.width * strip.height) * 12 + ScreenshotRenderer.mosaicCacheLimit
                 let additions = try await ImageWorkBudget.shared.withPermit(estimatedBytes: cost, priority: .userInitiated) {
-                    try await self.recognizeStrip(base: base, pointSize: pointSize, annotations: annotations,
-                        strip: strip, cancellation: cancellation)
+                    try await self.recognizeStrip(source, strip: strip, cancellation: cancellation)
                 }
                 try Task.checkCancellation()
-                ScreenshotTextLayout.merge(additions, into: &lines)
+                lines.append(additions)
                 progress(Double(index + 1) / Double(strips.count))
             }
             try Task.checkCancellation()
-            return ScreenshotTextLayout.text(from: lines)
+            return ScreenshotTextLayout.text(from: lines.lines)
         } onCancel: { cancellation.cancel() }
     }
 
-    private func recognizeStrip(base: CGImage, pointSize: CGSize, annotations: [ScreenshotAnnotation],
-                                strip: CGRect, cancellation: ScreenshotTextCancellation) throws -> [ScreenshotTextLine] {
+    private func recognizeStrip(_ source: ScreenshotRecognitionImage, strip: CGRect,
+                                cancellation: ScreenshotRecognitionCancellation) throws -> [ScreenshotTextLine] {
         try Task.checkCancellation()
         return try autoreleasepool {
-            let image = try Self.renderStrip(base: base, pointSize: pointSize, annotations: annotations, strip: strip)
+            let image = try source.render(strip)
             let request = VNRecognizeTextRequest()
             request.recognitionLevel = .accurate
             request.minimumTextHeight = 0
@@ -157,18 +136,11 @@ actor SystemScreenshotTextRecognizer: ScreenshotTextRecognizing {
                 let box = observation.boundingBox
                 return ScreenshotTextLine(text: text, rect: CGRect(x: box.minX * strip.width,
                     y: strip.minY + (1 - box.maxY) * strip.height,
-                    width: box.width * strip.width, height: box.height * strip.height), confidence: candidate.confidence)
+                    width: box.width * strip.width, height: box.height * strip.height), confidence: candidate.confidence,
+                    clipped: (strip.minY > 0 && (1 - box.maxY) * strip.height < 2)
+                        || (strip.maxY < CGFloat(source.base.height) && box.minY * strip.height < 2))
             }
         }
     }
 
-    static func renderStrip(base: CGImage, pointSize: CGSize, annotations: [ScreenshotAnnotation], strip: CGRect) throws -> CGImage {
-        if annotations.isEmpty {
-            guard let crop = base.cropping(to: strip) else { throw ScreenshotImageError.invalidSelection }
-            return crop
-        }
-        let sx = pointSize.width / CGFloat(base.width), sy = pointSize.height / CGFloat(base.height)
-        return try ScreenshotRenderer.render(base: base, pointSize: pointSize, annotations: annotations,
-            region: CGRect(x: strip.minX * sx, y: strip.minY * sy, width: strip.width * sx, height: strip.height * sy))
-    }
 }

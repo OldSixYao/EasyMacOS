@@ -194,8 +194,11 @@ import Testing
         try await video(valid, red: true)
         let invalid = root.appendingPathComponent("invalid.mp4")
         try Data([0, 1, 2]).write(to: invalid)
-        await #expect(throws: (any Error).self) {
+        do {
             _ = try await ScreenRecordingExporter().export(segments: [valid, invalid], directory: session)
+            Issue.record("损坏片段不能被无提示地跳过")
+        } catch let recovery as ScreenRecordingRecoveryError {
+            #expect(recovery.playable == [valid] && recovery.damaged == [invalid])
         }
         #expect(FileManager.default.fileExists(atPath: valid.path))
         #expect(try FileManager.default.contentsOfDirectory(atPath: session.path).isEmpty)

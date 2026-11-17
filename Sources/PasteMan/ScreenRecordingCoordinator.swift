@@ -16,6 +16,8 @@ import Observation
     private(set) var savedURL: URL?
     private(set) var sessionDirectory: URL?
     private(set) var segments: [URL] = []
+    private(set) var playableRecoverySegments: [URL] = []
+    private var recoveryNeedsReload = false
     private(set) var target: ScreenRecordingTarget?
     private(set) var mode: Mode = .fullScreen
     private var options = ScreenRecordingOptions()
@@ -208,35 +210,56 @@ import Observation
         currentURL = nil
     }
 
-    private func finish() async {
+    private func finish(playableOnly: Bool = false) async {
         guard let sessionDirectory else { reset(); return }
         phase = .saving
         saveProgress = 0
         let token = generation
         do {
-            let result = try await exporter.export(segments: segments, directory: sessionDirectory) { [weak self] value in
+            let result = try await exporter.export(segments: playableOnly ? playableRecoverySegments : segments,
+                directory: sessionDirectory) { [weak self] value in
                 Task { @MainActor in
                     guard let self, self.generation == token, self.phase == .saving else { return }
                     self.saveProgress = min(1, max(self.saveProgress, value))
                 }
             }
             savedURL = result
-            forget(sessionDirectory)
-            try? FileManager.default.removeItem(at: sessionDirectory)
+            if !playableOnly {
+                forget(sessionDirectory)
+                try? FileManager.default.removeItem(at: sessionDirectory)
+            }
             self.sessionDirectory = nil
             segments = []
             let issue = pendingFailure
             reset()
-            if let issue { errorMessage = issue.localizedDescription }
+            if playableOnly {
+                errorMessage = L.t("Playable segments were saved. All original segments and the recovery entry have been kept.",
+                    "已保存可用片段，全部原始片段及恢复入口仍保留。")
+            } else if let issue { errorMessage = issue.localizedDescription }
             onFinished?()
-        } catch { fail(error) }
+        } catch {
+            if let recovery = error as? ScreenRecordingRecoveryError {
+                playableRecoverySegments = recovery.playable
+            }
+            fail(error)
+        }
     }
 
     func retrySave() {
-        guard phase == .failed, sessionDirectory != nil, !segments.isEmpty else { return }
+        guard phase == .failed, let sessionDirectory else { return }
+        if recoveryNeedsReload, !loadRecovery(sessionDirectory) { return }
+        guard !segments.isEmpty else { return }
+        playableRecoverySegments = []
         errorMessage = nil
         phase = .saving
         task = Task { [weak self] in await self?.finish() }
+    }
+
+    func savePlayableSegments() {
+        guard phase == .failed, sessionDirectory != nil, !playableRecoverySegments.isEmpty else { return }
+        errorMessage = nil
+        phase = .saving
+        task = Task { [weak self] in await self?.finish(playableOnly: true) }
     }
 
     /// 关闭错误界面只结束会话，片段及恢复记录继续保留。
@@ -252,17 +275,35 @@ import Observation
         pendingFailure = nil
         stopRequested = false
         sessionDirectory = directory
-        segments = ((try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [])
-            .filter { $0.lastPathComponent.hasPrefix("segment-") && $0.pathExtension == "mp4" }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
-        if segments.isEmpty {
-            clearEmptySession(directory)
-            reset()
-            return
-        }
+        guard loadRecovery(directory) else { return }
         phase = .failed
         errorMessage = L.t("An unfinished recording can be recovered.", "发现未完成的录制，可重新保存已有片段。")
         onShowControls?()
+    }
+
+    @discardableResult private func loadRecovery(_ directory: URL) -> Bool {
+        do {
+            let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            if files.isEmpty { clearEmptySession(directory); reset(); return false }
+            segments = files.filter { $0.lastPathComponent.hasPrefix("segment-") && $0.pathExtension == "mp4" }
+                .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            recoveryNeedsReload = false
+            if segments.isEmpty {
+                errorMessage = ScreenRecordingError.empty.localizedDescription
+                phase = .failed
+                onShowControls?()
+                return false
+            }
+            return true
+        } catch {
+            // 读取错误不等于空目录，不能删除片段或注销恢复入口。
+            recoveryNeedsReload = true
+            errorMessage = L.t("Could not read the recording folder. Restore access and retry saving; original files have been kept.",
+                "无法读取录屏目录，请恢复访问权限后重试保存；原始文件及恢复入口已保留。")
+            phase = .failed
+            onShowControls?()
+            return false
+        }
     }
 
     private func fail(_ error: Error) {
@@ -297,6 +338,8 @@ import Observation
         target = nil
         sessionDirectory = nil
         segments = []
+        playableRecoverySegments = []
+        recoveryNeedsReload = false
         stopRequested = false
         phase = .idle
     }

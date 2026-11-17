@@ -69,6 +69,27 @@ import Testing
             fileURLWithPath: ProcessInfo.processInfo.environment["PASTEMAN_RENDER_DIR"] ?? "/tmp/pasteman-rendering",
             isDirectory: true)
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        let recoveryDirectory = directory.appendingPathComponent(".easymacos-recording-preview", isDirectory: true)
+        try FileManager.default.createDirectory(at: recoveryDirectory, withIntermediateDirectories: true)
+        for name in ["segment-000000.mp4", "segment-000001.mp4"] {
+            try Data("合成预览片段".utf8).write(to: recoveryDirectory.appendingPathComponent(name))
+        }
+        defaults.set([recoveryDirectory.path], forKey: "screenRecordingRecoveries")
+        let recording = ScreenRecordingCoordinator(exporter: RenderingRecoveryExporter(), defaults: defaults)
+        recording.recover(recoveryDirectory)
+        recording.retrySave()
+        let recoveryDeadline = ContinuousClock.now + .seconds(3)
+        while recording.phase != .failed, ContinuousClock.now < recoveryDeadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        try #require(recording.playableRecoverySegments.count == 1)
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            let mode = appearance == .aqua ? "light" : "dark"
+            try await snapshot(ScreenRecordingControls(coordinator: recording, close: {}),
+                size: ScreenRecordingControls.size(for: .failed), appearance: appearance,
+                to: output.appendingPathComponent("recording-partial-recovery-\(mode).png"))
+        }
+        recording.keepForRecovery()
         try await snapshot(
             HistoryView(model: model), size: NSSize(width: 440, height: 590), appearance: .aqua,
             to: output.appendingPathComponent("history-light.png"))
@@ -155,26 +176,29 @@ import Testing
         let screen = ScreenshotScreen(id: 1, frame: CGRect(x: 0, y: 0, width: 800, height: 600), scale: 1)
         let capture = CapturedScreen(
             screen: screen, image: try #require(sample.cgImage(forProposedRect: nil, context: nil, hints: nil)))
-        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
-            let result = ScreenshotTextSession(input: .image(capture.image, pointSize: screen.frame.size, annotations: []),
-                recognizer: RenderingTextRecognizer(), presentWindow: { _ in })
-            defer { result.close() }
-            result.window.appearance = NSAppearance(named: appearance)
-            result.show()
-            for _ in 0..<100 where result.state == .recognizing { try await Task.sleep(for: .milliseconds(5)) }
-            #expect(result.state == .ready)
-            let content = try #require(result.window.contentView)
-            content.wantsLayer = true
-            result.window.effectiveAppearance.performAsCurrentDrawingAppearance {
-                content.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        for kind in ScreenshotRecognitionKind.allCases {
+            for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+                let result = ScreenshotTextSession(input: .image(capture.image, pointSize: screen.frame.size, annotations: []),
+                    kind: kind, recognizer: RenderingTextRecognizer(kind: kind), presentWindow: { _ in })
+                defer { result.close() }
+                result.window.appearance = NSAppearance(named: appearance)
+                result.show()
+                for _ in 0..<100 where result.state == .recognizing { try await Task.sleep(for: .milliseconds(5)) }
+                #expect(result.state == .ready)
+                let content = try #require(result.window.contentView)
+                content.wantsLayer = true
+                result.window.effectiveAppearance.performAsCurrentDrawingAppearance {
+                    content.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+                }
+                try await Task.sleep(for: .milliseconds(150))
+                content.layoutSubtreeIfNeeded()
+                let bitmap = try #require(content.bitmapImageRepForCachingDisplay(in: content.bounds))
+                content.cacheDisplay(in: content.bounds, to: bitmap)
+                let png = try #require(bitmap.representation(using: .png, properties: [:]))
+                let mode = appearance == .aqua ? "light" : "dark"
+                let name = kind == .text ? "text" : "barcode"
+                try png.write(to: output.appendingPathComponent("screenshot-\(name)-result-\(mode).png"))
             }
-            try await Task.sleep(for: .milliseconds(150))
-            content.layoutSubtreeIfNeeded()
-            let bitmap = try #require(content.bitmapImageRepForCachingDisplay(in: content.bounds))
-            content.cacheDisplay(in: content.bounds, to: bitmap)
-            let png = try #require(bitmap.representation(using: .png, properties: [:]))
-            let mode = appearance == .aqua ? "light" : "dark"
-            try png.write(to: output.appendingPathComponent("screenshot-text-result-\(mode).png"))
         }
         let coordinator = ScreenshotCoordinator(presentWindow: { _ in })
         let overlay = ScreenshotOverlay(capture: capture, coordinator: coordinator)
@@ -226,8 +250,15 @@ import Testing
     }
 }
 
+private struct RenderingRecoveryExporter: ScreenRecordingExporting {
+    func export(segments: [URL], directory: URL, progress: @escaping @Sendable (Double) -> Void) async throws -> URL {
+        throw ScreenRecordingRecoveryError(playable: Array(segments.prefix(1)), damaged: Array(segments.dropFirst()))
+    }
+}
+
 private struct RenderingTextRecognizer: ScreenshotTextRecognizing {
+    var kind: ScreenshotRecognitionKind = .text
     func recognize(_ input: ScreenshotTextInput, progress: @escaping @Sendable (Double) -> Void) async throws -> String {
-        "截图文字识别\n这段文字可以编辑和复制。\nHello, EasyMacOS! 12345"
+        kind == .text ? "截图文字识别\n这段文字可以编辑和复制。\nHello, EasyMacOS! 12345" : "https://example.com/截图?value=123\n0123456789012"
     }
 }

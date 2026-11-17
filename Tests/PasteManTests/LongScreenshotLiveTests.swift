@@ -1,5 +1,6 @@
 import AppKit
 import ScreenCaptureKit
+import Synchronization
 import Testing
 @testable import PasteMan
 
@@ -37,9 +38,9 @@ import Testing
         let driver = SystemLongScreenshotScroll()
         let target = try driver.resolve(region)
         try #require(target.processID == pid, "只能交接到本轮合成窗口，前台测试窗口不得遮挡选区")
-        #expect(throws: LongScreenshotTargetError.applicationChanged) { try driver.validate(target, region: region) }
+        await #expect(throws: LongScreenshotTargetError.applicationChanged) { try await driver.validate(target, region: region) }
         try await driver.prepare(target, region: region)
-        try driver.validate(target, region: region)
+        try await driver.validate(target, region: region)
         #expect(NSWorkspace.shared.frontmostApplication?.processIdentifier == pid)
         print("可见后台窗口实机检查：初始前台不同，准备后目标获得焦点且完整校验通过；未采集图片或发送滚轮。")
     }
@@ -81,16 +82,16 @@ import Testing
         let target = try driver.resolve(region)
         try #require(target.processID == pid)
         try await driver.prepare(target, region: region)
-        try driver.validate(target, region: region)
-        var missingHitChecks = 0
+        try await driver.validate(target, region: region)
+        let missingHitChecks = Mutex(0)
         let unavailableHit = SystemLongScreenshotScroll(hitTest: { _, _ in
-            missingHitChecks += 1
+            missingHitChecks.withLock { $0 += 1 }
             return nil
         })
         // 只替换辅助功能命中边界；窗口编号、位置、遮挡、真实前台与权限继续读取系统。
         try await unavailableHit.prepare(target, region: region)
-        try unavailableHit.validate(target, region: region)
-        #expect(missingHitChecks >= 6, "系统与应用级命中均缺值时，真实有效窗口仍可完成连续准备")
+        try await unavailableHit.validate(target, region: region)
+        #expect(missingHitChecks.withLock { $0 } >= 6, "系统与应用级命中均缺值时，真实有效窗口仍可完成连续准备")
         #expect(NSWorkspace.shared.frontmostApplication?.processIdentifier == pid)
     }
 }
@@ -204,10 +205,10 @@ import Testing
             try await Task.sleep(for: .milliseconds(60))
             if attempt.isMultiple(of: 2) { NSApp.activate() }
             panel.contentView = nil; panel.close()
-            do { try driver.validate(target, region: region) }
+            do { try await driver.validate(target, region: region) }
             catch let issue as LongScreenshotTargetError where issue.canWaitForInitialFocus { transitions += 1 }
             try await driver.prepare(target, region: region)
-            try driver.validate(target, region: region)
+            try await driver.validate(target, region: region)
         }
         print("浮层退场实机检查：六次准备全部通过，观察到 \(transitions) 次异步焦点或命中过渡；未发送滚轮事件。")
     }

@@ -44,6 +44,7 @@ import PasteManCore
     var onClear: (() -> Void)?
     var onPause: (() -> Void)?
     var onIgnoreWrite: (() -> Void)?
+    var onCleanupNeeded: (() -> Void)?
     var target: NSRunningApplication?
     private var loadTask: Task<Void, Never>?
     private var revision = 0
@@ -233,41 +234,43 @@ import PasteManCore
     func toggleFavorite(_ entry: HistoryEntry) {
         guard settings.clipboardEnabled else { return }
         Task {
+            defer { changed() }
             do {
                 try await repository.setFavorite(entry.id, value: !entry.isFavorite)
                 try await repository.prune(policy: settings.policy, now: Date())
-                changed()
-            } catch { message = L.error(error) }
+            } catch { mutationFailed(error) }
         }
     }
     func delete(_ entry: HistoryEntry) {
         guard settings.clipboardEnabled else { return }
         Task {
+            defer { ThumbnailCache.shared.remove(entry.id); changed() }
             do {
                 try await repository.delete(entry.id)
-                ThumbnailCache.shared.remove(entry.id)
-                changed()
-            } catch { message = L.error(error) }
+            } catch { mutationFailed(error) }
         }
     }
     func clear(includingFavorites: Bool) {
         guard settings.clipboardEnabled else { return }
         Task {
+            defer { ThumbnailCache.shared.removeAll(); changed() }
             do {
                 try await repository.clear(includingFavorites: includingFavorites)
-                ThumbnailCache.shared.removeAll()
-                changed()
-            } catch { message = L.error(error) }
+            } catch { mutationFailed(error) }
         }
     }
     func applyRetention() {
         guard settings.clipboardEnabled else { return }
         Task {
+            defer { changed() }
             do {
                 try await repository.prune(policy: settings.policy, now: Date())
-                changed()
-            } catch { message = L.error(error) }
+            } catch { mutationFailed(error) }
         }
+    }
+    private func mutationFailed(_ error: Error) {
+        message = L.error(error)
+        if error as? StoreError == .imageCleanupPending { onCleanupNeeded?() }
     }
     func activate(_ entry: HistoryEntry, copyOnly: Bool = false) {
         guard settings.clipboardEnabled, !pasteInProgress else { return }

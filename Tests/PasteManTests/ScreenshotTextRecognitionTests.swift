@@ -64,13 +64,26 @@ private struct ImmediateTextRecognizer: ScreenshotTextRecognizing {
         #expect(ScreenshotTextLayout.text(from: lines) == "首行\n重复文字 同行右侧\n重复文字")
     }
 
+    @Test func clippedBoundaryLinePrefersCompleteTextAndKeepsDistinctPositions() {
+        var lines = [ScreenshotTextLine(text: "Poundarv content 1234567890",
+            rect: CGRect(x: 40, y: 2371, width: 560, height: 29), confidence: 0.75)]
+        ScreenshotTextLayout.merge([
+            ScreenshotTextLine(text: "Boundary content 1234567890", rect: CGRect(x: 40, y: 2371, width: 560, height: 43), confidence: 0.95),
+            ScreenshotTextLine(text: "content 1234567890", rect: CGRect(x: 230, y: 2372, width: 370, height: 42), confidence: 0.9),
+            ScreenshotTextLine(text: "Boundary content 1234567890", rect: CGRect(x: 40, y: 2500, width: 560, height: 43), confidence: 0.95),
+            ScreenshotTextLine(text: "同行独立文字", rect: CGRect(x: 650, y: 2372, width: 240, height: 42), confidence: 0.95),
+        ], into: &lines)
+        #expect(lines.count == 3)
+        #expect(ScreenshotTextLayout.text(from: lines) == "Boundary content 1234567890 同行独立文字\nBoundary content 1234567890")
+    }
+
     @Test func recognitionStripRendersCommittedMarksAtOriginalResolution() throws {
         let base = try recognitionImage(width: 400, height: 5000)
         let annotation = ScreenshotAnnotation(tool: .rectangle,
             points: [CGPoint(x: 10, y: 1950), CGPoint(x: 100, y: 2050)], color: AnnotationColor.palette[0], width: 6)
         let strip = CGRect(x: 0, y: 3840, width: 400, height: 1160)
-        let actual = try SystemScreenshotTextRecognizer.renderStrip(base: base, pointSize: CGSize(width: 200, height: 2500),
-            annotations: [annotation], strip: strip)
+        let actual = try ScreenshotRecognitionImage(base: base, pointSize: CGSize(width: 200, height: 2500),
+            annotations: [annotation]).render(strip)
         let complete = try ScreenshotRenderer.render(base: base, pointSize: CGSize(width: 200, height: 2500), annotations: [annotation])
         let expected = try #require(complete.cropping(to: strip))
         #expect(actual.width == 400 && actual.height == 1160)
@@ -92,6 +105,19 @@ private struct ImmediateTextRecognizer: ScreenshotTextRecognizing {
         #expect(first.lowerBound < last.lowerBound)
     }
 
+    @Test func clippedSystemBoundaryResultDoesNotDuplicateTheCompleteLine() async throws {
+        let context = try #require(CGContext(data: nil, width: 1200, height: 5000, bitsPerComponent: 8,
+            bytesPerRow: 4800, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 1200, height: 5000))
+        let image = try ScreenshotRenderer.render(base: #require(context.makeImage()), pointSize: CGSize(width: 1200, height: 5000),
+            annotations: [ScreenshotAnnotation(tool: .text, points: [CGPoint(x: 40, y: 2370)],
+                color: AnnotationColor.palette[5], width: 7, text: "Boundary content 1234567890")])
+        let text = try await SystemScreenshotTextRecognizer.shared.recognize(
+            .image(image, pointSize: CGSize(width: 1200, height: 5000), annotations: []), progress: { _ in })
+        #expect(text == "Boundary content 1234567890")
+    }
+
     @Test func blankImageHasNoTextAndPreCancelledWorkDoesNotRecognize() async throws {
         let image = try recognitionImage()
         let text = try await SystemScreenshotTextRecognizer.shared.recognize(
@@ -107,20 +133,22 @@ private struct ImmediateTextRecognizer: ScreenshotTextRecognizing {
     }
 }
 
-@Suite("文字识别结果窗口", .serialized) @MainActor struct ScreenshotTextResultTests {
-    private func session(recognizer: any ScreenshotTextRecognizing = ImmediateTextRecognizer()) throws -> ScreenshotTextSession {
+@Suite("文字与条码识别结果窗口", .serialized) @MainActor struct ScreenshotTextResultTests {
+    private func session(kind: ScreenshotRecognitionKind, recognizer: any ScreenshotTextRecognizing = ImmediateTextRecognizer()) throws -> ScreenshotTextSession {
         _ = NSApplication.shared
-        return ScreenshotTextSession(input: .image(try recognitionImage(), pointSize: CGSize(width: 800, height: 400), annotations: []),
+        return ScreenshotTextSession(input: .image(try recognitionImage(), pointSize: CGSize(width: 800, height: 400), annotations: []), kind: kind,
             recognizer: recognizer, presentWindow: { _ in })
     }
 
-    @Test func selectionCopyAndFailedCopyKeepResultWhileCopyAllClosesIt() async throws {
-        let session = try session()
+    @Test(arguments: ScreenshotRecognitionKind.allCases)
+    func selectionCopyAndFailedCopyKeepResultWhileCopyAllClosesIt(kind: ScreenshotRecognitionKind) async throws {
+        let session = try session(kind: kind)
         defer { session.close() }
         var copied: [String] = []
         session.onCopy = { copied.append($0); return true }
         session.show()
         try await waitForRecognition { session.state == .ready }
+        #expect(session.window.title == kind.title)
         session.textView.string = "已编辑的结果 Hello"
         session.textView.setSelectedRange(NSRange(location: 0, length: 3))
         session.textView.copy(nil)
@@ -139,9 +167,10 @@ private struct ImmediateTextRecognizer: ScreenshotTextRecognizing {
         #expect(copied.count == 2 && reasons.count == 1)
     }
 
-    @Test func closingCancelsPendingWorkDiscardsLateResultAndReleasesController() async throws {
+    @Test(arguments: ScreenshotRecognitionKind.allCases)
+    func closingCancelsPendingWorkDiscardsLateResultAndReleasesController(kind: ScreenshotRecognitionKind) async throws {
         let recognizer = PendingTextRecognizer()
-        var session: ScreenshotTextSession? = try session(recognizer: recognizer)
+        var session: ScreenshotTextSession? = try session(kind: kind, recognizer: recognizer)
         let isReleased = { [weak session] in session == nil }
         var closed = 0
         session?.onClose = { _ in closed += 1 }
@@ -156,9 +185,10 @@ private struct ImmediateTextRecognizer: ScreenshotTextRecognizing {
         #expect(recognizer.cancelled == 1 && closed == 1)
     }
 
-    @Test func duplicateShowDoesNotStartAgainAndFailureCanRetryToEmptyThenSuccess() async throws {
+    @Test(arguments: ScreenshotRecognitionKind.allCases)
+    func duplicateShowDoesNotStartAgainAndFailureCanRetryToEmptyThenSuccess(kind: ScreenshotRecognitionKind) async throws {
         let recognizer = PendingTextRecognizer()
-        let session = try session(recognizer: recognizer)
+        let session = try session(kind: kind, recognizer: recognizer)
         defer { session.close() }
         session.show(); session.show(); session.retry()
         try await waitForRecognition { recognizer.pending.count == 1 }
@@ -177,8 +207,9 @@ private struct ImmediateTextRecognizer: ScreenshotTextRecognizing {
         #expect(session.textView.string == "恢复成功")
     }
 
-    @Test func escapeClosesOnlyResultAndDoesNotDismissActiveComposition() async throws {
-        let session = try session()
+    @Test(arguments: ScreenshotRecognitionKind.allCases)
+    func escapeClosesOnlyResultAndDoesNotDismissActiveComposition(kind: ScreenshotRecognitionKind) async throws {
+        let session = try session(kind: kind)
         session.show()
         try await waitForRecognition { session.state == .ready }
         session.window.makeFirstResponder(session.textView)
@@ -200,13 +231,13 @@ private struct ImmediateTextRecognizer: ScreenshotTextRecognizing {
     }
 }
 
-@Suite("截图与钉图文字识别接入", .serialized) @MainActor struct ScreenshotTextIntegrationTests {
+@Suite("截图与钉图文字及条码识别接入", .serialized) @MainActor struct ScreenshotTextIntegrationTests {
     private func editor(recognizer: any ScreenshotTextRecognizing,
                         screens: [ScreenshotScreen] = [ScreenshotScreen(id: 1, frame: CGRect(x: 0, y: 0, width: 800, height: 600), scale: 1)],
                         presentWindow: @escaping (NSPanel) -> Void = { _ in }) async throws -> (ScreenshotCoordinator, ScreenshotOverlay) {
         _ = NSApplication.shared
         let coordinator = ScreenshotCoordinator(captureService: RecognitionScreenCapture(), presentWindow: presentWindow,
-            textRecognizer: recognizer, presentTextWindow: { _ in })
+            textRecognizer: recognizer, barcodeRecognizer: recognizer, presentTextWindow: { _ in })
         coordinator.start(screens: screens, sourceID: "test.source", sourceName: "原始来源")
         try await waitForRecognition { coordinator.phase == .selecting }
         let view = try #require(coordinator.windows.first?.contentView as? ScreenshotOverlay)
@@ -219,7 +250,8 @@ private struct ImmediateTextRecognizer: ScreenshotTextRecognizing {
         return (coordinator, view)
     }
 
-    @Test func returningFromResultRestoresSelectedDisplayAndKeyboardFocus() async throws {
+    @Test(arguments: ScreenshotRecognitionKind.allCases)
+    func returningFromResultRestoresSelectedDisplayAndKeyboardFocus(kind: ScreenshotRecognitionKind) async throws {
         var presented: [NSPanel] = []
         let (coordinator, view) = try await editor(recognizer: ImmediateTextRecognizer(), screens: [
             ScreenshotScreen(id: 1, frame: CGRect(x: -800, y: 0, width: 800, height: 600), scale: 1),
@@ -227,7 +259,7 @@ private struct ImmediateTextRecognizer: ScreenshotTextRecognizing {
         ], presentWindow: { presented.append($0) })
         defer { coordinator.cancel() }
         let active = try #require(view.window)
-        view.state.action?(.recognizeText)
+        view.state.action?(kind == .text ? .recognizeText : .recognizeBarcodes)
         let session = try #require(coordinator.textSession)
         try await waitForRecognition { session.state == .ready }
         session.close()
@@ -235,7 +267,8 @@ private struct ImmediateTextRecognizer: ScreenshotTextRecognizing {
         #expect(coordinator.selectedScreen == 1 && coordinator.phase == .editing)
     }
 
-    @Test func selectionAndAnnotationsSurvivePreviewAndSelectionCopyKeepsSessionActive() async throws {
+    @Test(arguments: ScreenshotRecognitionKind.allCases)
+    func selectionAndAnnotationsSurvivePreviewAndSelectionCopyKeepsSessionActive(kind: ScreenshotRecognitionKind) async throws {
         let recognizer = PendingTextRecognizer()
         let (coordinator, view) = try await editor(recognizer: recognizer)
         defer { coordinator.cancel() }
@@ -247,8 +280,9 @@ private struct ImmediateTextRecognizer: ScreenshotTextRecognizing {
             #expect(id == "test.source" && name == "原始来源"); copied.append(text); return true
         }
         let selection = view.selection
-        view.state.action?(.recognizeText)
+        view.state.action?(kind == .text ? .recognizeText : .recognizeBarcodes)
         let result = try #require(coordinator.textSession)
+        #expect(result.kind == kind)
         try await waitForRecognition { recognizer.pending.count == 1 }
         if case .image(let image, let size, let marks) = recognizer.inputs[0] {
             #expect(image.width == 400 && image.height == 240 && size == selection.size && marks == [annotation])
@@ -259,18 +293,19 @@ private struct ImmediateTextRecognizer: ScreenshotTextRecognizing {
         result.textView.selectAll(nil)
         result.textView.copy(nil)
         #expect(copied == ["编辑后复制"])
-        #expect(coordinator.phase == .recognizingText && coordinator.isActive)
+        #expect(coordinator.phase == (kind == .text ? .recognizingText : .recognizingBarcodes) && coordinator.isActive)
         result.close()
         #expect(coordinator.textSession == nil && coordinator.phase == .editing && !view.state.busy)
         #expect(view.selection == selection && view.state.history.annotations == [annotation])
     }
 
-    @Test func copyAllButtonClosesResultAndEndsScreenshotWithoutRestoringEditor() async throws {
+    @Test(arguments: ScreenshotRecognitionKind.allCases)
+    func copyAllButtonClosesResultAndEndsScreenshotWithoutRestoringEditor(kind: ScreenshotRecognitionKind) async throws {
         var presented: [NSPanel] = []
         let (coordinator, view) = try await editor(recognizer: ImmediateTextRecognizer(), presentWindow: { presented.append($0) })
         defer { coordinator.cancel() }
         let window = try #require(view.window)
-        view.state.action?(.recognizeText)
+        view.state.action?(kind == .text ? .recognizeText : .recognizeBarcodes)
         let result = try #require(coordinator.textSession)
         try await waitForRecognition { result.state == .ready }
         let presentations = presented.count
@@ -289,10 +324,11 @@ private struct ImmediateTextRecognizer: ScreenshotTextRecognizing {
         #expect(coordinator.windows.isEmpty && window.contentView == nil && presented.count == presentations)
     }
 
-    @Test func disablingScreenshotClosesResultWithoutRestoringCancelledEditor() async throws {
+    @Test(arguments: ScreenshotRecognitionKind.allCases)
+    func disablingScreenshotClosesResultWithoutRestoringCancelledEditor(kind: ScreenshotRecognitionKind) async throws {
         let recognizer = PendingTextRecognizer()
         let (coordinator, view) = try await editor(recognizer: recognizer)
-        view.state.action?(.recognizeText)
+        view.state.action?(kind == .text ? .recognizeText : .recognizeBarcodes)
         let result = try #require(coordinator.textSession)
         try await waitForRecognition { recognizer.pending.count == 1 }
         coordinator.isEnabled = false
@@ -302,11 +338,13 @@ private struct ImmediateTextRecognizer: ScreenshotTextRecognizing {
         #expect(coordinator.phase == .idle && coordinator.textSession == nil)
     }
 
-    @Test func pinnedSessionsUseOriginalStorageAndAreCancelledIndependently() async throws {
+    @Test(arguments: ScreenshotRecognitionKind.allCases)
+    func pinnedSessionsUseOriginalStorageAndAreCancelledIndependently(kind: ScreenshotRecognitionKind) async throws {
         _ = NSApplication.shared
         let recognizer = PendingTextRecognizer()
         let pins = PinnedScreenshotManager(presentWindow: { _ in })
         pins.textRecognizer = recognizer
+        pins.barcodeRecognizer = recognizer
         var results: [NSPanel] = []
         pins.presentTextWindow = { results.append($0) }
         defer { pins.closeAll() }
@@ -318,7 +356,9 @@ private struct ImmediateTextRecognizer: ScreenshotTextRecognizing {
         func recognize(_ window: NSWindow) throws {
             let event = try #require(NSEvent.mouseEvent(with: .rightMouseUp, location: .zero, modifierFlags: [], timestamp: 0,
                 windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 0))
-            let item = try #require(window.contentView?.menu(for: event)?.items.first { $0.action == NSSelectorFromString("recognizeText") })
+            let item = try #require(window.contentView?.menu(for: event)?.items.first {
+                $0.action == NSSelectorFromString(kind == .text ? "recognizeText" : "recognizeBarcodes")
+            })
             #expect(NSApp.sendAction(try #require(item.action), to: item.target, from: item))
         }
         let first = pins.windows[0], second = pins.windows[1]
@@ -339,10 +379,12 @@ private struct ImmediateTextRecognizer: ScreenshotTextRecognizing {
         #expect(recognizer.cancelled == 2 && results.allSatisfy { $0.contentView == nil })
     }
 
-    @Test func pinnedCopyAllClosesOnlyResultAndAllowsRecognitionAgain() async throws {
+    @Test(arguments: ScreenshotRecognitionKind.allCases)
+    func pinnedCopyAllClosesOnlyResultAndAllowsRecognitionAgain(kind: ScreenshotRecognitionKind) async throws {
         _ = NSApplication.shared
         let pins = PinnedScreenshotManager(presentWindow: { _ in })
         pins.textRecognizer = ImmediateTextRecognizer()
+        pins.barcodeRecognizer = ImmediateTextRecognizer()
         var results: [NSPanel] = []
         pins.presentTextWindow = { results.append($0) }
         var copied = ""
@@ -353,7 +395,9 @@ private struct ImmediateTextRecognizer: ScreenshotTextRecognizing {
         let window = try #require(pins.windows.first)
         let event = try #require(NSEvent.mouseEvent(with: .rightMouseUp, location: .zero, modifierFlags: [], timestamp: 0,
             windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 0))
-        let item = try #require(window.contentView?.menu(for: event)?.items.first { $0.action == NSSelectorFromString("recognizeText") })
+        let item = try #require(window.contentView?.menu(for: event)?.items.first {
+            $0.action == NSSelectorFromString(kind == .text ? "recognizeText" : "recognizeBarcodes")
+        })
         #expect(NSApp.sendAction(try #require(item.action), to: item.target, from: item))
         let session = try #require(results.first?.delegate as? ScreenshotTextSession)
         try await waitForRecognition { session.state == .ready }

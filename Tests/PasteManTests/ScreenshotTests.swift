@@ -165,6 +165,12 @@ private func pixel(_ image: CGImage, _ x: Int, _ y: Int) -> [UInt8] {
         #expect(image.size.width > 0 && image.size.height > 0)
     }
 
+    @Test func barcodeRecognitionToolbarSymbolExists() throws {
+        let image = try #require(NSImage(systemSymbolName: ScreenshotToolbar.barcodeRecognitionSymbol,
+            accessibilityDescription: nil))
+        #expect(image.size.width > 0 && image.size.height > 0)
+    }
+
     @Test func fullScreenOverlaysDoNotAnimateWhenPresentedOrClosed() async throws {
         let service = DelayedScreenCapture()
         var presented: [NSPanel] = []

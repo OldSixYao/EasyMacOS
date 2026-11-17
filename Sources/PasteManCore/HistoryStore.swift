@@ -15,7 +15,7 @@ public actor HistoryStore: HistoryRepository {
         try db.execute("PRAGMA journal_mode = WAL")
         try db.execute("PRAGMA secure_delete = ON")
         let version = try db.rows("PRAGMA user_version") { sqlite3_column_int($0, 0) }.first ?? 0
-        guard version <= 1 else { throw StoreError.unsupportedVersion }
+        guard version <= 2 else { throw StoreError.unsupportedVersion }
         try db.execute(
             """
             CREATE TABLE IF NOT EXISTS history (
@@ -33,6 +33,9 @@ public actor HistoryStore: HistoryRepository {
         try db.execute("DROP INDEX IF EXISTS history_ordinary")
         let database = db
         try database.transaction {
+            // 删除记录和登记图片清理在同一事务完成，文件系统失败后仍可恢复。
+            try database.execute("CREATE TABLE IF NOT EXISTS history_image_deletions (id TEXT PRIMARY KEY)")
+            try database.execute("CREATE TRIGGER IF NOT EXISTS history_queue_image_deletion AFTER DELETE ON history WHEN OLD.kind='image' BEGIN INSERT OR IGNORE INTO history_image_deletions(id) VALUES(OLD.id); END")
             try database.execute("CREATE TABLE IF NOT EXISTS history_totals (id INTEGER PRIMARY KEY CHECK(id=1), bytes INTEGER NOT NULL, pinned INTEGER NOT NULL, ordinary INTEGER NOT NULL)")
             let columns = try database.rows("PRAGMA table_info(history_totals)") { Database.text($0, 1) }
             if !columns.contains("ordinary") {
@@ -50,13 +53,22 @@ public actor HistoryStore: HistoryRepository {
             try database.execute("CREATE TRIGGER IF NOT EXISTS history_delete_total AFTER DELETE ON history BEGIN UPDATE history_totals SET bytes=bytes-OLD.bytes, pinned=pinned-OLD.favorite*OLD.bytes, ordinary=ordinary-1+OLD.favorite WHERE id=1; END")
             try database.execute("CREATE TRIGGER IF NOT EXISTS history_update_total AFTER UPDATE OF bytes,favorite ON history BEGIN UPDATE history_totals SET bytes=bytes+NEW.bytes-OLD.bytes, pinned=pinned+NEW.favorite*NEW.bytes-OLD.favorite*OLD.bytes, ordinary=ordinary+OLD.favorite-NEW.favorite WHERE id=1; END")
         }
-        try db.execute("PRAGMA user_version = 1")
+        try db.execute("PRAGMA user_version = 2")
         let known = Set(try db.rows("SELECT id FROM history WHERE kind = 'image'") { Database.text($0, 0) })
         for file in try fm.contentsOfDirectory(at: imageDirectory, includingPropertiesForKeys: nil) {
             let id = file.lastPathComponent.components(separatedBy: ".").first ?? ""
-            if !known.contains(id) { try fm.removeItem(at: file) }
+            if !known.contains(id) {
+                if UUID(uuidString: id) != nil {
+                    try db.execute("INSERT OR IGNORE INTO history_image_deletions(id) VALUES(?)", [.text(id)])
+                } else { try? fm.removeItem(at: file) }
+            }
         }
+        // 目录暂时不可写只留下清理任务，不妨碍读取已有历史。
+        do { _ = try Self.removePendingImages(db: db, directory: imageDirectory) }
+        catch StoreError.imageCleanupPending {}
     }
+
+    public func retry() async throws { _ = try removePendingImages() }
 
     public func list(search: String = "", filter: HistoryFilter = .all, source: String? = nil) throws -> [HistoryEntry]
     {
@@ -64,7 +76,7 @@ public actor HistoryStore: HistoryRepository {
     }
 
     public func page(search: String = "", filter: HistoryFilter = .all, source: String? = nil,
-                     after: HistoryCursor? = nil, limit: Int = 100) throws -> HistoryPage {
+                     after: HistoryCursor? = nil, limit: Int = 100) async throws -> HistoryPage {
         try query(search: search, filter: filter, source: source, after: after, limit: max(1, min(500, limit)))
     }
     private func query(search: String, filter: HistoryFilter, source: String?, after: HistoryCursor?, limit: Int?) throws -> HistoryPage {
@@ -210,20 +222,21 @@ public actor HistoryStore: HistoryRepository {
     }
     public func delete(_ id: UUID) throws {
         try db.execute("DELETE FROM history WHERE id = ?", [.text(id.uuidString)])
-        try removeImage(id)
+        _ = try removePendingImages()
     }
     public func clear(includingFavorites: Bool) throws {
-        let removed = try retentionEntries().filter { includingFavorites || !$0.isFavorite }
         try db.execute(includingFavorites ? "DELETE FROM history" : "DELETE FROM history WHERE favorite = 0")
-        try removeImages(removed)
+        var cleanupError: Error?
+        do { _ = try removePendingImages() } catch { cleanupError = error }
         // Best effort: compact deleted text out of the database and WAL. This is not a secure-erase guarantee.
         try db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         try db.execute("VACUUM")
+        if let cleanupError { throw cleanupError }
     }
     public func prune(policy: RetentionPolicy, now: Date = Date()) throws {
-        _ = try pruneIfNeeded(policy: policy, now: now)
+        _ = try pruneSynchronously(policy: policy, now: now)
     }
-    public func nextCleanup(policy: RetentionPolicy, now: Date) throws -> Date {
+    public func nextCleanup(policy: RetentionPolicy, now: Date) async throws -> Date {
         let oldest = try db.rows("SELECT min(copied_at) FROM history WHERE favorite=0") { row -> Double? in
             sqlite3_column_type(row, 0) == SQLITE_NULL ? nil : sqlite3_column_double(row, 0)
         }.first ?? nil
@@ -231,7 +244,10 @@ public actor HistoryStore: HistoryRepository {
             Date(timeIntervalSince1970: $0 + Double(policy.days) * 86400 + 1)
         } ?? now.addingTimeInterval(3600))
     }
-    public func pruneIfNeeded(policy: RetentionPolicy, now: Date = Date()) throws -> Bool {
+    public func pruneIfNeeded(policy: RetentionPolicy, now: Date = Date()) async throws -> Bool {
+        try pruneSynchronously(policy: policy, now: now)
+    }
+    private func pruneSynchronously(policy: RetentionPolicy, now: Date) throws -> Bool {
         let cutoff = now.addingTimeInterval(-Double(policy.days) * 86400).timeIntervalSince1970
         var removed: [RetentionEntry] = []
         try db.transaction {
@@ -252,8 +268,8 @@ public actor HistoryStore: HistoryRepository {
                 removed += capacity
             }
         }
-        try removeImages(removed)
-        return !removed.isEmpty
+        let cleaned = try removePendingImages()
+        return !removed.isEmpty || cleaned
     }
     private func totals() throws -> (bytes: Int, pinned: Int, ordinary: Int) {
         try db.rows("SELECT bytes, pinned, ordinary FROM history_totals WHERE id=1") {
@@ -302,11 +318,24 @@ public actor HistoryStore: HistoryRepository {
             throw error
         }
     }
-    private func removeImage(_ id: UUID) throws {
-        for thumbnail in [false, true] {
-            let url = imageURL(id, thumbnail: thumbnail)
-            if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
+    private func removePendingImages() throws -> Bool {
+        try Self.removePendingImages(db: db, directory: imageDirectory)
+    }
+    private static func removePendingImages(db: Database, directory: URL) throws -> Bool {
+        let pending = try db.rows("SELECT id FROM history_image_deletions") { Database.text($0, 0) }
+        var failed = false
+        for value in pending {
+            guard let id = UUID(uuidString: value) else { throw StoreError.missingContent }
+            var removed = true
+            for suffix in [".png", ".thumb.png"] {
+                do { try FileManager.default.removeItem(at: directory.appendingPathComponent(id.uuidString + suffix)) }
+                catch let error as CocoaError where error.code == .fileNoSuchFile { }
+                catch { removed = false; failed = true }
+            }
+            if removed { try db.execute("DELETE FROM history_image_deletions WHERE id=?", [.text(value)]) }
         }
+        if failed { throw StoreError.imageCleanupPending }
+        return !pending.isEmpty
     }
     private struct RetentionEntry {
         let id: UUID
@@ -326,8 +355,5 @@ public actor HistoryStore: HistoryRepository {
                 id: id, kind: kind, copiedAt: Date(timeIntervalSince1970: sqlite3_column_double(row, 2)),
                 isFavorite: sqlite3_column_int(row, 3) != 0, byteCount: Int(sqlite3_column_int64(row, 4)))
         }
-    }
-    private func removeImages(_ entries: [RetentionEntry]) throws {
-        for entry in entries where entry.kind == .image { try removeImage(entry.id) }
     }
 }

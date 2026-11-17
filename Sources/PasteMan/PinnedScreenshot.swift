@@ -57,6 +57,7 @@ import UniformTypeIdentifiers
     var onCopy: ((ScreenshotImage, String, String) -> Bool)?
     var onCopyText: ((String, String, String) -> Bool)?
     var textRecognizer: any ScreenshotTextRecognizing = SystemScreenshotTextRecognizer.shared
+    var barcodeRecognizer: any ScreenshotTextRecognizing = SystemScreenshotBarcodeRecognizer.shared
     var presentTextWindow: (NSPanel) -> Void = { NSApp.activate(); $0.makeKeyAndOrderFront(nil) }
     var count: Int { windows.count }
     var cachedDisplayByteCount: Int {
@@ -106,6 +107,7 @@ import UniformTypeIdentifiers
         view.frame = CGRect(origin: .zero, size: initialFrame.size)
         view.onCopy = { [weak self] value in self?.onCopy?(value, sourceID, sourceName) ?? false }
         view.textRecognizer = textRecognizer
+        view.barcodeRecognizer = barcodeRecognizer
         view.presentTextWindow = presentTextWindow
         view.onCopyText = { [weak self] text in self?.onCopyText?(text, sourceID, sourceName) ?? false }
         view.onReset = { [weak window] in window?.setContentSize(image.pointSize) }
@@ -160,6 +162,7 @@ import UniformTypeIdentifiers
     private var saveTask: Task<Void, Never>?
     private var disposed = false
     var textRecognizer: any ScreenshotTextRecognizing = SystemScreenshotTextRecognizer.shared
+    var barcodeRecognizer: any ScreenshotTextRecognizing = SystemScreenshotBarcodeRecognizer.shared
     var presentTextWindow: (NSPanel) -> Void = { NSApp.activate(); $0.makeKeyAndOrderFront(nil) }
     var onCopyText: ((String) -> Bool)?
     private var textSession: ScreenshotTextSession?
@@ -172,8 +175,8 @@ import UniformTypeIdentifiers
         layerContentsRedrawPolicy = .onSetNeedsDisplay
         layer?.contentsGravity = .resizeAspect
         toolTip = L.t(
-            "Drag to move. Double-click to dismiss. Scroll or resize from the edges to zoom. Right-click to copy, save, or recognize text.",
-            "拖动移动，双击关闭钉图，滚轮或拖拽边缘缩放。右键可复制、保存或识别文字。")
+            "Drag to move. Double-click to dismiss. Scroll or resize from the edges to zoom. Right-click to copy, save, recognize text, or scan codes.",
+            "拖动移动，双击关闭钉图，滚轮或拖拽边缘缩放。右键可复制、保存、识别文字或条码。")
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override var mouseDownCanMoveWindow: Bool { false }
@@ -281,6 +284,7 @@ import UniformTypeIdentifiers
         for (title, action) in [
             (L.t("Copy", "复制"), #selector(copyImage)), (L.t("Save…", "保存…"), #selector(saveImage)),
             (L.t("Recognize text", "识别文字"), #selector(recognizeText)),
+            (ScreenshotRecognitionKind.barcodes.title, #selector(recognizeBarcodes)),
             (L.t("Original size", "恢复原始显示比例"), #selector(resetSize)), (L.t("Close", "关闭"), #selector(closeImage)),
         ] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
@@ -289,10 +293,13 @@ import UniformTypeIdentifiers
         }
         return menu
     }
-    @objc private func recognizeText() {
+    @objc private func recognizeText() { recognize(.text) }
+    @objc private func recognizeBarcodes() { recognize(.barcodes) }
+    private func recognize(_ kind: ScreenshotRecognitionKind) {
         guard !disposed else { return }
         if let textSession { textSession.show(); return }
-        let session = ScreenshotTextSession(input: .pinned(image), recognizer: textRecognizer, presentWindow: presentTextWindow)
+        let session = ScreenshotTextSession(input: .pinned(image), kind: kind,
+            recognizer: kind == .text ? textRecognizer : barcodeRecognizer, presentWindow: presentTextWindow)
         session.onCopy = { [weak self] in self?.onCopyText?($0) ?? false }
         session.onClose = { [weak self] _ in self?.textSession = nil }
         textSession = session

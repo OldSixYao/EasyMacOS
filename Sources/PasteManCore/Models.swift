@@ -72,7 +72,7 @@ public struct RetentionPolicy: Sendable {
 
 public enum StoreError: Error, LocalizedError, Sendable, Equatable {
     case database(String)
-    case storageFull, processingBusy, missingContent, invalidImage, imageTooLarge, unsupportedVersion
+    case storageFull, processingBusy, missingContent, invalidImage, imageTooLarge, unsupportedVersion, imageCleanupPending
     public var errorDescription: String? {
         switch self {
         case .database(let message): "History database: \(message)"
@@ -82,6 +82,7 @@ public enum StoreError: Error, LocalizedError, Sendable, Equatable {
         case .invalidImage: "This image could not be decoded."
         case .imageTooLarge: "Image skipped: maximum 20 MiB and 40 million pixels."
         case .unsupportedVersion: "This history was created by a newer version of EasyMacOS."
+        case .imageCleanupPending: "History entries were deleted, but some image files could not be removed. Cleanup will retry."
         }
     }
 }

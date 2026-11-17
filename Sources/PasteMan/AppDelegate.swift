@@ -129,6 +129,7 @@ import SwiftUI
             watcher.onError = { [weak state] in state?.recordingIssue = L.error($0) }
             watcher.onCaptureSucceeded = { [weak state] in state?.recordingIssue = nil }
             state.onIgnoreWrite = { [weak watcher] in watcher?.ignoreOwnWrite() }
+            state.onCleanupNeeded = { [weak watcher] in watcher?.scheduleCleanup() }
             state.onClose = { [weak self] in self?.hidePanel() }
             state.onSettings = { [weak self] in self?.showSettings() }
             state.onMenu = { [weak self] in self?.showMenu() }
