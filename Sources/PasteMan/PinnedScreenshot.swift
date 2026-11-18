@@ -59,6 +59,7 @@ import UniformTypeIdentifiers
     var textRecognizer: any ScreenshotTextRecognizing = SystemScreenshotTextRecognizer.shared
     var barcodeRecognizer: any ScreenshotTextRecognizing = SystemScreenshotBarcodeRecognizer.shared
     var presentTextWindow: (NSPanel) -> Void = { NSApp.activate(); $0.makeKeyAndOrderFront(nil) }
+    var presentEditorWindow: (PinnedScreenshotEditor) -> Void = { $0.show() }
     var count: Int { windows.count }
     var cachedDisplayByteCount: Int {
         windows.reduce(0) { $0 + (($1.contentView as? PinnedScreenshotView)?.displayByteCount ?? 0) }
@@ -109,8 +110,9 @@ import UniformTypeIdentifiers
         view.textRecognizer = textRecognizer
         view.barcodeRecognizer = barcodeRecognizer
         view.presentTextWindow = presentTextWindow
+        view.presentEditorWindow = presentEditorWindow
         view.onCopyText = { [weak self] text in self?.onCopyText?(text, sourceID, sourceName) ?? false }
-        view.onReset = { [weak window] in window?.setContentSize(image.pointSize) }
+        view.onReset = { [weak window] size in window?.setContentSize(size) }
         view.onClose = { [weak window] in window?.close() }
         window.contentView = view
         windows.append(window)
@@ -144,7 +146,7 @@ import UniformTypeIdentifiers
 }
 
 @MainActor private final class PinnedScreenshotView: NSView {
-    let image: PinnedImageStorage
+    private var image: PinnedImageStorage
     private var displayImage: CGImage?
     private var displayPixels = 0
     private var displayRevision = 0
@@ -155,15 +157,18 @@ import UniformTypeIdentifiers
     private var pixelLimit = 2048
     private var requestedPixels = 0
     var onCopy: ((ScreenshotImage) -> Bool)?
-    var onReset: (() -> Void)?
+    var onReset: ((CGSize) -> Void)?
     var onClose: (() -> Void)?
     private let saveImageData: (Data) async throws -> Bool
     private let reportError: (String) -> Void
     private var saveTask: Task<Void, Never>?
+    private var changeTask: Task<Void, Never>?
+    private var editor: PinnedScreenshotEditor?
     private var disposed = false
     var textRecognizer: any ScreenshotTextRecognizing = SystemScreenshotTextRecognizer.shared
     var barcodeRecognizer: any ScreenshotTextRecognizing = SystemScreenshotBarcodeRecognizer.shared
     var presentTextWindow: (NSPanel) -> Void = { NSApp.activate(); $0.makeKeyAndOrderFront(nil) }
+    var presentEditorWindow: (PinnedScreenshotEditor) -> Void = { $0.show() }
     var onCopyText: ((String) -> Bool)?
     private var textSession: ScreenshotTextSession?
     init(image: PinnedImageStorage, saveImage: @escaping (Data) async throws -> Bool, reportError: @escaping (String) -> Void) {
@@ -175,8 +180,8 @@ import UniformTypeIdentifiers
         layerContentsRedrawPolicy = .onSetNeedsDisplay
         layer?.contentsGravity = .resizeAspect
         toolTip = L.t(
-            "Drag to move. Double-click to dismiss. Scroll or resize from the edges to zoom. Right-click to copy, save, recognize text, or scan codes.",
-            "拖动移动，双击关闭钉图，滚轮或拖拽边缘缩放。右键可复制、保存、识别文字或条码。")
+            "Drag to move. Double-click to dismiss. Scroll or resize from the edges to zoom. Right-click to rotate, mirror, crop, edit, copy, save, or recognize content.",
+            "拖动移动，双击关闭钉图，滚轮或拖拽边缘缩放。右键可旋转、镜像、裁剪、二次编辑、复制、保存或识别内容。")
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override var mouseDownCanMoveWindow: Bool { false }
@@ -281,22 +286,184 @@ import UniformTypeIdentifiers
     }
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu()
-        for (title, action) in [
-            (L.t("Copy", "复制"), #selector(copyImage)), (L.t("Save…", "保存…"), #selector(saveImage)),
-            (L.t("Recognize text", "识别文字"), #selector(recognizeText)),
-            (ScreenshotRecognitionKind.barcodes.title, #selector(recognizeBarcodes)),
-            (L.t("Original size", "恢复原始显示比例"), #selector(resetSize)), (L.t("Close", "关闭"), #selector(closeImage)),
-        ] {
+        menu.autoenablesItems = false
+        let canRead = !disposed && changeTask == nil && editor == nil
+        let canChange = canRead && copyTask == nil && saveTask == nil
+        func add(_ title: String, _ action: Selector, to target: NSMenu, enabled: Bool = true) {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
-            item.target = self
+            item.target = self; item.isEnabled = enabled
+            target.addItem(item)
+        }
+        add(L.t("Copy", "复制"), #selector(copyImage), to: menu, enabled: canRead)
+        add(L.t("Save…", "保存…"), #selector(saveImage), to: menu, enabled: canRead)
+        menu.addItem(.separator())
+        for (title, actions) in [
+            (L.t("Rotate", "旋转"), [
+                (L.t("Rotate clockwise 90°", "顺时针旋转 90°"), #selector(rotateClockwise)),
+                (L.t("Rotate counterclockwise 90°", "逆时针旋转 90°"), #selector(rotateCounterclockwise)),
+                (L.t("Rotate 180°", "旋转 180°"), #selector(rotateHalfTurn))]),
+            (L.t("Mirror", "镜像"), [
+                (L.t("Mirror horizontally", "水平镜像"), #selector(mirrorHorizontally)),
+                (L.t("Mirror vertically", "垂直镜像"), #selector(mirrorVertically))]),
+        ] {
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            let submenu = NSMenu(title: title)
+            submenu.autoenablesItems = false
+            for (name, action) in actions { add(name, action, to: submenu, enabled: canChange) }
+            item.submenu = submenu; item.isEnabled = canChange
             menu.addItem(item)
         }
+        add(L.t("Crop pinned image…", "贴图裁剪…"), #selector(cropImage), to: menu, enabled: canChange || editor != nil)
+        add(L.t("Edit pinned image…", "二次编辑…"), #selector(editImage), to: menu, enabled: canChange || editor != nil)
+        menu.addItem(.separator())
+        for (title, action) in [
+            (L.t("Recognize text", "识别文字"), #selector(recognizeText)),
+            (ScreenshotRecognitionKind.barcodes.title, #selector(recognizeBarcodes)),
+        ] {
+            add(title, action, to: menu, enabled: canRead)
+        }
+        menu.addItem(.separator())
+        add(L.t("Original size", "恢复原始显示比例"), #selector(resetSize), to: menu, enabled: !disposed)
+        add(L.t("Close", "关闭"), #selector(closeImage), to: menu, enabled: !disposed)
         return menu
+    }
+    @objc private func rotateClockwise() { transform(.clockwise) }
+    @objc private func rotateCounterclockwise() { transform(.counterclockwise) }
+    @objc private func rotateHalfTurn() { transform(.halfTurn) }
+    @objc private func mirrorHorizontally() { transform(.horizontalMirror) }
+    @objc private func mirrorVertically() { transform(.verticalMirror) }
+    @objc private func cropImage() { beginEditing(.crop) }
+    @objc private func editImage() { beginEditing(.annotate) }
+    private var canChangeImage: Bool {
+        !disposed && changeTask == nil && copyTask == nil && saveTask == nil && editor == nil
+    }
+    private func closeRecognition() {
+        textSession?.close(notify: false); textSession = nil
+    }
+    private func transform(_ operation: PinnedImageTransform) {
+        guard canChangeImage else { return }
+        closeRecognition()
+        changeTask = Task { [weak self, image] in
+            defer { self?.changeTask = nil }
+            do {
+                let base = try await image.loadImage()
+                try Task.checkCancellation()
+                let result = try await PinnedImageWorker.shared.transform(base: base, pointSize: image.pointSize, operation: operation)
+                try Task.checkCancellation()
+                guard let self, !self.disposed else { return }
+                self.replaceImage(result)
+            } catch is CancellationError {} catch {
+                guard !Task.isCancelled, let self, !self.disposed else { return }
+                self.reportError(error.localizedDescription)
+            }
+        }
+    }
+    private func beginEditing(_ mode: PinnedScreenshotEditor.Mode) {
+        if let editor { presentEditorWindow(editor); return }
+        guard canChangeImage else { return }
+        closeRecognition()
+        changeTask = Task { [weak self, image] in
+            defer { self?.changeTask = nil }
+            do {
+                let base = try await image.loadImage()
+                try Task.checkCancellation()
+                guard let self, !self.disposed else { return }
+                let editor = PinnedScreenshotEditor(image: base, pointSize: image.pointSize, mode: mode)
+                editor.onClose = { [weak self] in self?.closeEditor() }
+                editor.onFinish = { [weak self] in self?.finishEditing($0) }
+                self.editor = editor
+                self.presentEditorWindow(editor)
+            } catch is CancellationError {} catch {
+                guard !Task.isCancelled, let self, !self.disposed else { return }
+                self.reportError(error.localizedDescription)
+            }
+        }
+    }
+    private func closeEditor() {
+        editor?.close(); editor = nil
+    }
+    private func finishEditing(_ output: ScreenshotCoordinator.Output?) {
+        guard !disposed, changeTask == nil, let editor, !editor.state.busy else { return }
+        editor.canvas.commitText()
+        let document = editor.canvas.document
+        let annotations = editor.state.history.annotations
+        let selection = editor.cropView?.selection
+        editor.state.busy = true; editor.state.error = nil; editor.state.layoutChanged?()
+        changeTask = Task { [weak self, weak editor] in
+            defer { self?.changeTask = nil }
+            do {
+                let result: PinnedImageStorage
+                if let selection {
+                    result = try await PinnedImageWorker.shared.crop(base: document.image, pointSize: document.pointSize,
+                        selection: selection)
+                } else {
+                    result = try await PinnedImageWorker.shared.archive(base: document.image,
+                        pointSize: document.pointSize, annotations: annotations)
+                }
+                try Task.checkCancellation()
+                if let output {
+                    let png = try await result.png()
+                    try Task.checkCancellation()
+                    switch output {
+                    case .copy:
+                        let bitmap = try await result.loadImage()
+                        try Task.checkCancellation()
+                        guard let self, !self.disposed else { return }
+                        guard self.onCopy?(ScreenshotImage(image: bitmap, png: png, pointSize: result.pointSize)) == true else {
+                            throw CocoaError(.fileWriteUnknown, userInfo: [NSLocalizedDescriptionKey:
+                                L.t("Could not write to the clipboard. Try again.", "无法写入剪贴板，请重试。")])
+                        }
+                    case .save:
+                        guard let save = self?.saveImageData else { return }
+                        let saved = try await save(png)
+                        try Task.checkCancellation()
+                        if !saved {
+                            editor?.state.busy = false; editor?.state.layoutChanged?()
+                            return
+                        }
+                    case .pin: break
+                    }
+                }
+                guard let self, let editor, !self.disposed, self.editor === editor else { return }
+                let snappedSelection = selection.map { area in
+                    let pixels = ScreenshotGeometry.pixelRect(area, pointSize: document.pointSize,
+                        pixelSize: CGSize(width: document.image.width, height: document.image.height))
+                    return CGRect(x: pixels.minX * document.pointSize.width / CGFloat(document.image.width),
+                        y: pixels.minY * document.pointSize.height / CGFloat(document.image.height),
+                        width: result.pointSize.width, height: result.pointSize.height)
+                }
+                self.replaceImage(result, croppedRegion: snappedSelection)
+                self.closeEditor()
+            } catch is CancellationError {} catch {
+                guard !Task.isCancelled, let self, let editor, !self.disposed, self.editor === editor else { return }
+                editor.state.busy = false; editor.state.error = error.localizedDescription; editor.state.layoutChanged?()
+            }
+        }
+    }
+    private func replaceImage(_ result: PinnedImageStorage, croppedRegion: CGRect? = nil) {
+        let oldSize = image.pointSize
+        let scale = bounds.width / oldSize.width
+        image = result
+        displayRevision += 1; displayTask?.cancel(); displayTask = nil
+        displayImage = nil; displayPixels = 0; requestedPixels = 0; layer?.contents = nil
+        if let window {
+            let oldFrame = window.frame
+            let size = CGSize(width: result.pointSize.width * scale, height: result.pointSize.height * scale)
+            let origin: CGPoint
+            if let croppedRegion {
+                origin = CGPoint(x: oldFrame.minX + croppedRegion.minX * scale,
+                    y: oldFrame.minY + (oldSize.height - croppedRegion.maxY) * scale)
+            } else { origin = CGPoint(x: oldFrame.midX - size.width / 2, y: oldFrame.midY - size.height / 2) }
+            window.contentAspectRatio = result.pointSize
+            window.contentMinSize = CGSize(width: min(100, result.pointSize.width), height: min(60, result.pointSize.height))
+            window.setFrame(CGRect(origin: origin, size: size), display: true)
+        }
+        requestDisplay()
     }
     @objc private func recognizeText() { recognize(.text) }
     @objc private func recognizeBarcodes() { recognize(.barcodes) }
     private func recognize(_ kind: ScreenshotRecognitionKind) {
-        guard !disposed else { return }
+        guard !disposed, changeTask == nil, editor == nil else { return }
         if let textSession { textSession.show(); return }
         let session = ScreenshotTextSession(input: .pinned(image), kind: kind,
             recognizer: kind == .text ? textRecognizer : barcodeRecognizer, presentWindow: presentTextWindow)
@@ -306,7 +473,7 @@ import UniformTypeIdentifiers
         session.show()
     }
     @objc private func copyImage() {
-        guard !disposed, copyTask == nil else { return }
+        guard !disposed, copyTask == nil, changeTask == nil, editor == nil else { return }
         copyTask = Task { [weak self, image] in
             defer { self?.copyTask = nil }
             do {
@@ -324,7 +491,7 @@ import UniformTypeIdentifiers
         }
     }
     @objc private func saveImage() {
-        guard !disposed, saveTask == nil else { return }
+        guard !disposed, saveTask == nil, changeTask == nil, editor == nil else { return }
         saveTask = Task { [weak self, saveImageData, image] in
             defer { self?.saveTask = nil }
             do {
@@ -342,7 +509,9 @@ import UniformTypeIdentifiers
     }
     func dispose() {
         disposed = true
-        textSession?.close(notify: false); textSession = nil
+        closeRecognition()
+        closeEditor()
+        changeTask?.cancel(); changeTask = nil
         onCopyText = nil
         displayRevision += 1
         layer?.contents = nil
@@ -358,7 +527,7 @@ import UniformTypeIdentifiers
         onReset = nil
         onClose = nil
     }
-    @objc private func resetSize() { onReset?() }
+    @objc private func resetSize() { onReset?(image.pointSize) }
     @objc private func closeImage() { onClose?() }
     static func showError(_ message: String) {
         let alert = NSAlert()

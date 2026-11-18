@@ -85,9 +85,17 @@ final class ScreenshotRecognitionCancellation: Sendable {
     }
 }
 
-/// 所有识别会话共用后台执行器，同步系统识别不会占用主线程。
-actor SystemScreenshotTextRecognizer: ScreenshotTextRecognizing {
+struct SystemScreenshotTextRecognizer: ScreenshotTextRecognizing {
     static let shared = SystemScreenshotTextRecognizer()
+
+    func recognize(_ input: ScreenshotTextInput, progress: @escaping @Sendable (Double) -> Void) async throws -> String {
+        try await ScreenshotRecognitionProcess.shared.recognize(input, kind: .text, progress: progress)
+    }
+}
+
+/// 仅由短生命周期的辅助进程调用，同步系统识别不会占用主线程。
+actor InProcessScreenshotTextRecognizer: ScreenshotTextRecognizing {
+    static let shared = InProcessScreenshotTextRecognizer()
 
     func recognize(_ input: ScreenshotTextInput, progress: @escaping @Sendable (Double) -> Void) async throws -> String {
         let cancellation = ScreenshotRecognitionCancellation()

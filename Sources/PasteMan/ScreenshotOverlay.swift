@@ -6,6 +6,16 @@ import SwiftUI
     var tool = AnnotationTool.select
     var colorIndex = 0
     var width: CGFloat = 3
+    var mosaicOptions = ScreenshotMosaicOptions() {
+        didSet {
+            if mosaicOptions != oldValue { mosaicAttributesChanged?() }
+            if mosaicOptions.mode != oldValue.mode { layoutChanged?() }
+        }
+    }
+    var mosaicAttributesChanged: (() -> Void)?
+    var textStyle = AnnotationTextStyle() { didSet { if textStyle != oldValue { textAttributesChanged?() } } }
+    var textColor = AnnotationColor.palette[0] { didSet { if textColor != oldValue { textAttributesChanged?() } } }
+    var textAttributesChanged: (() -> Void)?
     var history = AnnotationHistory()
     var shapeTool = AnnotationTool.rectangle
     var optionsExpanded = false
@@ -13,15 +23,22 @@ import SwiftUI
     var layoutChanged: (() -> Void)?
     var hoverChanged: ((ScreenshotHoverTarget?) -> Void)?
     var toolbarHeight: CGFloat {
-        46 + (optionsExpanded ? 36 : 0) + (shapesExpanded ? 36 : 0) + (busy ? 36 : 0) + (error == nil ? 0 : 68)
+        46 + (optionsExpanded ? optionsHeight : 0) + (shapesExpanded ? 36 : 0) + (busy ? 36 : 0) + (error == nil ? 0 : 68)
+    }
+    private var optionsHeight: CGFloat { tool == .text || (tool == .mosaic && mosaicOptions.mode == .brush) ? 72 : 36 }
+    func annotation(at point: CGPoint) -> ScreenshotAnnotation {
+        ScreenshotAnnotation(tool: tool, points: [point], color: AnnotationColor.palette[colorIndex], width: width,
+            mosaic: tool == .mosaic ? mosaicOptions : nil)
     }
     var busy = false
     var error: String?
     var isLongEditor = false
+    var isPinnedEditor = false
+    var usesImagePreview: Bool { isLongEditor || isPinnedEditor }
     var prefersLongScreenshot = false
     var confirmsLongScreenshot: Bool { prefersLongScreenshot && !isLongEditor }
     var previewMode = ScreenshotPreviewMode.fill
-    var toolbarWidth: CGFloat { ScreenshotToolbar.width + (isLongEditor ? 124 : 36) }
+    var toolbarWidth: CGFloat { ScreenshotToolbar.width + (usesImagePreview ? 124 : 36) }
     var canAdjust: Bool { history.annotations.isEmpty && history.undone.isEmpty }
     var action: ((ScreenshotEditorAction) -> Void)?
 }
@@ -57,6 +74,17 @@ enum ScreenshotPreviewMode: String, CaseIterable {
     }
 }
 
+/// 命中范围必须放在按钮标签内；按钮外的悬停范围不会扩大纯图标的点击范围。
+struct ScreenshotToolbarButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var enabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .contentShape(Rectangle())
+            .opacity(enabled ? (configuration.isPressed ? 0.65 : 1) : 0.4)
+    }
+}
+
 struct ScreenshotToolbar: View {
     @Bindable var state: ScreenshotEditorState
     static let width: CGFloat = 564
@@ -81,7 +109,7 @@ struct ScreenshotToolbar: View {
                     enabled: !state.history.annotations.isEmpty)
                 action("arrow.uturn.forward", title: L.t("Redo ⇧⌘Z", "重做 ⇧⌘Z"), action: .redo,
                     enabled: !state.history.undone.isEmpty)
-                if !state.isLongEditor {
+                if !state.usesImagePreview {
                     action("arrow.up.left.and.arrow.down.right", title: L.t("Reselect", "重新框选"), action: .reselect)
                     action(Self.scrollingScreenshotSymbol, title: state.canAdjust
                         ? L.t("Start scrolling screenshot", "开始长截屏")
@@ -90,20 +118,28 @@ struct ScreenshotToolbar: View {
                 } else {
                     separator
                     ForEach(ScreenshotPreviewMode.allCases, id: \.self) { mode in
-                        action(mode.symbol, title: mode.title, action: .preview(mode), detail: mode.detail,
+                        let fitImage = state.isPinnedEditor && mode == .fill
+                        action(mode.symbol, title: fitImage ? L.t("Fit image", "适应窗口") : mode.title, action: .preview(mode),
+                            detail: fitImage ? L.t("Show the complete image inside the window.", "在窗口中完整显示图片。") : mode.detail,
                             selected: state.previewMode == mode)
                             .accessibilityIdentifier("screenshot.preview." + mode.rawValue)
                     }
                 }
                 separator
-                action("text.viewfinder", title: L.t("Recognize text", "识别文字"), action: .recognizeText)
-                    .accessibilityIdentifier("screenshot.recognizeText")
-                action(Self.barcodeRecognitionSymbol, title: ScreenshotRecognitionKind.barcodes.title, action: .recognizeBarcodes)
-                    .accessibilityIdentifier("screenshot.recognizeBarcodes")
+                if !state.isPinnedEditor {
+                    action("text.viewfinder", title: L.t("Recognize text", "识别文字"), action: .recognizeText)
+                        .accessibilityIdentifier("screenshot.recognizeText")
+                    action(Self.barcodeRecognitionSymbol, title: ScreenshotRecognitionKind.barcodes.title, action: .recognizeBarcodes)
+                        .accessibilityIdentifier("screenshot.recognizeBarcodes")
+                }
                 action("square.and.arrow.down", title: L.t("Save PNG…", "保存 PNG…"), action: .save)
-                action("pin", title: L.t("Pin to desktop", "钉在桌面"), action: .pin)
+                if state.isPinnedEditor {
+                    action("doc.on.doc", title: L.t("Copy ⌘C", "复制 ⌘C"), action: .copy)
+                } else {
+                    action("pin", title: L.t("Pin to desktop", "钉在桌面"), action: .pin)
+                }
                 action("xmark", title: L.t("Cancel Esc", "取消 Esc"), action: .cancel, color: .red)
-                action("checkmark", title: state.confirmsLongScreenshot
+                action("checkmark", title: state.isPinnedEditor ? L.t("Apply to pinned image", "应用到贴图") : state.confirmsLongScreenshot
                     ? (state.canAdjust ? L.t("Start scrolling screenshot", "开始长截屏")
                         : L.t("Reselect before starting a scrolling screenshot", "已有标注，请先重新框选再长截屏"))
                     : L.t("Finish and copy ⌘C", "完成并复制 ⌘C"), action: .confirm, color: Self.tint,
@@ -124,14 +160,16 @@ struct ScreenshotToolbar: View {
                         } label: {
                             Label(tool.title, systemImage: tool.symbol)
                         }
-                        .disabled(tool == .select && (!state.canAdjust || state.isLongEditor))
+                        .disabled(tool == .select && (!state.canAdjust || state.usesImagePreview))
                         .modifier(ScreenshotHoverFeedback(title: tool.title, state: state,
-                            buttonEnabled: tool != .select || (state.canAdjust && !state.isLongEditor)))
+                            buttonEnabled: tool != .select || (state.canAdjust && !state.usesImagePreview)))
                     }
                     Spacer(minLength: 0)
                 }.frame(height: 36).padding(.horizontal, 14)
             }
-            if state.optionsExpanded {
+            if state.optionsExpanded && state.tool == .text { ScreenshotTextOptions(state: state) }
+            if state.optionsExpanded && state.tool == .mosaic { ScreenshotMosaicOptionsView(state: state) }
+            if state.optionsExpanded && state.tool != .text && state.tool != .mosaic {
                 HStack(spacing: 12) {
                     ForEach(AnnotationColor.palette.indices, id: \.self) { index in
                         let color = AnnotationColor.palette[index]
@@ -164,7 +202,7 @@ struct ScreenshotToolbar: View {
             if let error = state.error { Text(error).font(.caption).foregroundStyle(.orange).lineLimit(3).padding(10) }
         }
         .font(.system(size: 17, weight: .regular))
-        .buttonStyle(.plain)
+        .buttonStyle(ScreenshotToolbarButtonStyle())
         .frame(width: state.toolbarWidth)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 9))
         .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(.primary.opacity(0.08), lineWidth: 0.5))
@@ -202,7 +240,7 @@ struct ScreenshotToolbar: View {
     }
 }
 
-private struct ScreenshotHoverFeedback: ViewModifier {
+struct ScreenshotHoverFeedback: ViewModifier {
     let title: String
     let state: ScreenshotEditorState
     var buttonEnabled = true
@@ -240,16 +278,21 @@ private struct ScreenshotHoverFeedback: ViewModifier {
     private var preview: CGImage?
     private var toolbar: NSHostingView<ScreenshotToolbar>?
     private let hoverTip = ScreenshotHoverTip()
-    private var textEditor: NSTextView?
+    private var textEditor: ScreenshotTextView?
     private var textPosition: CGPoint = .zero
-    private var textStyle: (AnnotationColor, CGFloat)?
     private var transient: ScreenshotAnnotation?
+    let mosaicPreview = ScreenshotMosaicPreview()
+    private var mosaicPointer: CGPoint?
+    var mosaicCursorRect: CGRect? {
+        guard state.tool == .mosaic, state.mosaicOptions.mode == .brush, !state.busy, let point = mosaicPointer else { return nil }
+        return ScreenshotMosaicCursor.rect(at: point, diameter: state.mosaicOptions.resolvedBrushSize)
+    }
     private var anchor = CGPoint.zero
     private var originalSelection = CGRect.zero
     private enum Drag {
         case selection, move
         case resize(Int)
-        case annotation
+        case annotation, textSizing
     }
     private var drag: Drag?
     private var previewTask: Task<Void, Never>?
@@ -279,12 +322,21 @@ private struct ScreenshotHoverFeedback: ViewModifier {
         state.action = { [weak self] in self?.perform($0) }
         state.layoutChanged = { [weak self] in self?.showToolbar() }
         state.hoverChanged = { [weak self] title in self?.showHoverTip(title) }
+        state.textAttributesChanged = { [weak self] in self?.updateTextAttributes() }
+        state.mosaicAttributesChanged = { [weak self] in self?.drawingSurface?.needsDisplay = true }
+        mosaicPreview.onChange = { [weak self] in self?.drawingSurface?.needsDisplay = true }
+        mosaicPreview.onError = { [weak self] error in
+            self?.state.error = error.localizedDescription; self?.showToolbar()
+        }
         setAccessibilityLabel(L.t("Screenshot selection and annotation", "截图框选与标注"))
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
-    override func resetCursorRects() { addCursorRect(bounds, cursor: .crosshair) }
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .crosshair)
+        if state.tool == .text, selectedImage != nil { addCursorRect(selection, cursor: .iBeam) }
+    }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -312,8 +364,17 @@ private struct ScreenshotHoverFeedback: ViewModifier {
         updateCursor(at: location(event))
     }
     override func mouseMoved(with event: NSEvent) { updateCursor(at: location(event)) }
-    override func mouseExited(with event: NSEvent) { hideCursorCard() }
+    override func mouseExited(with event: NSEvent) { hideCursorCard(); updateMosaicPointer(at: nil) }
+    private func updateMosaicPointer(at point: CGPoint?) {
+        let previous = mosaicCursorRect
+        mosaicPointer = point.flatMap { point in
+            selectedImage != nil && selection.contains(point) && toolbar?.frame.contains(point) != true ? point : nil
+        }
+        if let previous { drawingSurface?.setNeedsDisplay(previous.insetBy(dx: -3, dy: -3)) }
+        if let next = mosaicCursorRect { drawingSurface?.setNeedsDisplay(next.insetBy(dx: -3, dy: -3)) }
+    }
     private func updateCursor(at point: CGPoint) {
+        updateMosaicPointer(at: point)
         guard !state.busy, textEditor == nil,
             coordinator?.selectedScreen == nil || coordinator?.selectedScreen == capture.screen.id,
             selectedImage == nil || drag != nil,
@@ -397,15 +458,12 @@ private struct ScreenshotHoverFeedback: ViewModifier {
         context.saveGState()
         context.clip(to: selection)
         if let preview { ScreenshotRenderer.drawImage(preview, in: selection, context: context) }
-        if let transient {
-            context.translateBy(x: selection.minX, y: selection.minY)
-            if transient.tool == .mosaic {
-                context.setFillColor(NSColor.gray.withAlphaComponent(0.7).cgColor)
-                context.fill(transient.rect)
-            } else {
-                ScreenshotRenderer.draw(transient, in: context)
-            }
-        }
+        context.saveGState()
+        context.translateBy(x: selection.minX, y: selection.minY)
+        mosaicPreview.draw(in: context)
+        if let transient, transient.tool != .mosaic { ScreenshotRenderer.draw(transient, in: context) }
+        context.restoreGState()
+        if let rect = mosaicCursorRect { ScreenshotMosaicCursor.draw(rect, in: context) }
         context.restoreGState()
         context.setStrokeColor(NSColor(red: 0, green: 0.76, blue: 0.48, alpha: 1).cgColor)
         context.setLineWidth(1)
@@ -471,12 +529,15 @@ private struct ScreenshotHoverFeedback: ViewModifier {
             let p = CGPoint(x: anchor.x - selection.minX, y: anchor.y - selection.minY)
             if state.tool == .text {
                 beginText(at: p)
+                drag = .textSizing
+                hideCursorCard()
                 return
             }
             guard state.tool != .select else { return }
-            transient = ScreenshotAnnotation(
-                tool: state.tool, points: [p],
-                color: AnnotationColor.palette[state.colorIndex], width: state.width)
+            let annotation = state.annotation(at: p)
+            transient = annotation
+            mosaicPreview.begin(annotation, preceding: state.history.annotations)
+            requestMosaicPreview()
             drag = .annotation
             hideCursorCard()
         }
@@ -486,9 +547,11 @@ private struct ScreenshotHoverFeedback: ViewModifier {
         guard !state.busy, let drag else { return }
         let p = location(event)
         let previousSelection = selection
-        let previousStroke = transient?.rect.offsetBy(dx: selection.minX, dy: selection.minY)
+        let previousStroke = transient?.coverageBounds.offsetBy(dx: selection.minX, dy: selection.minY)
         updateCursor(at: p)
         switch drag {
+        case .textSizing:
+            textEditor?.resizeForCreation(delta: CGPoint(x: p.x - anchor.x, y: p.y - anchor.y))
         case .selection: selection = ScreenshotGeometry.rect(from: anchor, to: p)
         case .move:
             selection.origin.x = min(max(0, originalSelection.minX + p.x - anchor.x), bounds.width - selection.width)
@@ -507,17 +570,13 @@ private struct ScreenshotHoverFeedback: ViewModifier {
             let local = CGPoint(
                 x: min(max(p.x - selection.minX, 0), selection.width),
                 y: min(max(p.y - selection.minY, 0), selection.height))
-            if transient?.tool == .pen {
-                if let last = transient?.points.last, hypot(last.x - local.x, last.y - local.y) >= 0.75 {
-                    transient?.points.append(local)
-                }
-            } else if let first = transient?.points.first {
-                transient?.points = [first, local]
-            }
+            transient?.extend(to: local)
+            if let transient { mosaicPreview.update(transient) }
+            requestMosaicPreview()
         }
         let changed: CGRect
         if case .annotation = drag {
-            changed = (previousStroke ?? .zero).union(transient?.rect.offsetBy(dx: selection.minX, dy: selection.minY) ?? .zero)
+            changed = (previousStroke ?? .zero).union(transient?.coverageBounds.offsetBy(dx: selection.minX, dy: selection.minY) ?? .zero)
         } else { changed = previousSelection.union(selection) }
         drawingSurface?.setNeedsDisplay(changed.insetBy(dx: -32, dy: -32))
     }
@@ -526,10 +585,12 @@ private struct ScreenshotHoverFeedback: ViewModifier {
         mouseDragged(with: event)
         self.drag = nil
         switch drag {
+        case .textSizing: textEditor?.finishCreationSizing()
         case .annotation:
-            if let transient, transient.tool == .pen || transient.rect.width > 0 || transient.rect.height > 0 {
+            if let transient, transient.canCommit {
                 state.history.append(transient)
             }
+            mosaicPreview.end(commit: transient?.canCommit == true)
             transient = nil
             updatePreview()
         default:
@@ -569,42 +630,31 @@ private struct ScreenshotHoverFeedback: ViewModifier {
         hoverTip.show(target, in: window)
     }
     private func beginText(at point: CGPoint) {
-        let editor = NSTextView(
-            frame: CGRect(
-                x: selection.minX + point.x, y: selection.minY + point.y,
-                width: max(1, min(320, selection.width - point.x)),
-                height: max(1, min(100, selection.height - point.y))))
-        editor.font = .systemFont(ofSize: max(16, state.width * 6))
-        editor.textColor = NSColor(cgColor: AnnotationColor.palette[state.colorIndex].cgColor)
-        editor.backgroundColor = .textBackgroundColor
-        editor.isRichText = false
-        editor.isAutomaticQuoteSubstitutionEnabled = false
-        editor.isAutomaticDashSubstitutionEnabled = false
-        editor.textContainerInset = .zero
-        editor.textContainer?.lineFragmentPadding = 0
-        editor.textContainer?.widthTracksTextView = false
-        editor.textContainer?.containerSize = CGSize(width: 100_000, height: 100_000)
+        let editor = ScreenshotTextView(origin: CGPoint(x: selection.minX + point.x, y: selection.minY + point.y),
+            maximumSize: CGSize(width: selection.width - point.x, height: selection.height - point.y),
+            style: state.textStyle, color: state.textColor, scale: 1, movementBounds: selection)
+        editor.onFontSizeChanged = { [weak state] in state?.textStyle.fontSize = $0 }
         textPosition = point
-        textStyle = (AnnotationColor.palette[state.colorIndex], state.width)
         textEditor = editor
         addSubview(editor)
         window?.makeFirstResponder(editor)
     }
+    private func updateTextAttributes() { textEditor?.apply(style: state.textStyle, color: state.textColor) }
+    private func requestMosaicPreview() {
+        guard let base = selectedImage else { return }
+        mosaicPreview.request(base: base, pointSize: selection.size, visibleRegion: CGRect(origin: .zero, size: selection.size))
+    }
     func commitText() {
         guard let editor = textEditor else { return }
         editor.unmarkText()
-        let text = editor.string
-        editor.removeFromSuperview()
+        let annotation = editor.annotation(at: textPosition)
+        editor.dispose()
         textEditor = nil
         window?.makeFirstResponder(self)
-        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let style = textStyle {
-            state.history.append(
-                ScreenshotAnnotation(
-                    tool: .text, points: [textPosition], color: style.0,
-                    width: style.1, text: text))
+        if let annotation {
+            state.history.append(annotation)
             updatePreview()
         }
-        textStyle = nil
     }
     private func updatePreview() {
         previewTask?.cancel()
@@ -619,6 +669,7 @@ private struct ScreenshotHoverFeedback: ViewModifier {
                     base: base, pointSize: size, annotations: annotations, session: self?.previewSession)
                 guard !Task.isCancelled, let self, self.revision == version else { return }
                 self.preview = image
+                self.mosaicPreview.acknowledge(annotations)
                 self.drawingSurface?.needsDisplay = true
             } catch {
                 guard !Task.isCancelled, let self, self.revision == version else { return }
@@ -633,12 +684,17 @@ private struct ScreenshotHoverFeedback: ViewModifier {
         showHoverTip(nil)
         commitText()
         switch action {
-        case .tool(let tool): state.tool = tool
+        case .tool(let tool):
+            state.tool = tool
+            if tool == .text { state.optionsExpanded = true; state.shapesExpanded = false }
+            if window?.isVisible == true { window?.invalidateCursorRects(for: self) }
         case .preview: break
         case .undo:
+            mosaicPreview.clear()
             state.history.undo()
             updatePreview()
         case .redo:
+            mosaicPreview.clear()
             state.history.redo()
             updatePreview()
         case .reselect: coordinator?.reselect()
@@ -692,12 +748,14 @@ private struct ScreenshotHoverFeedback: ViewModifier {
         showHoverTip(nil)
         revision += 1
         hideCursorCard()
+        updateMosaicPointer(at: nil)
+        mosaicPreview.clear()
         previewTask?.cancel()
         previewTask = nil
         let session = previewSession
         previewSession = UUID()
         Task { await ScreenshotRenderWorker.shared.releasePreview(session: session) }
-        textEditor?.removeFromSuperview()
+        textEditor?.dispose()
         textEditor = nil
         toolbar?.removeFromSuperview()
         toolbar = nil

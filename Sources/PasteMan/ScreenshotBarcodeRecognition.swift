@@ -47,9 +47,17 @@ enum ScreenshotBarcodeLayout {
     }
 }
 
-/// 系统条码检测在后台执行，使用原始像素和已提交标注，不访问网络。
-actor SystemScreenshotBarcodeRecognizer: ScreenshotTextRecognizing {
+struct SystemScreenshotBarcodeRecognizer: ScreenshotTextRecognizing {
     static let shared = SystemScreenshotBarcodeRecognizer()
+
+    func recognize(_ input: ScreenshotTextInput, progress: @escaping @Sendable (Double) -> Void) async throws -> String {
+        try await ScreenshotRecognitionProcess.shared.recognize(input, kind: .barcodes, progress: progress)
+    }
+}
+
+/// 在辅助进程中使用原始像素和已提交标注检测，不访问网络。
+actor InProcessScreenshotBarcodeRecognizer: ScreenshotTextRecognizing {
+    static let shared = InProcessScreenshotBarcodeRecognizer()
 
     func recognize(_ input: ScreenshotTextInput, progress: @escaping @Sendable (Double) -> Void) async throws -> String {
         let cancellation = ScreenshotRecognitionCancellation()

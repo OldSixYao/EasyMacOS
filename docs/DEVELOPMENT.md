@@ -148,17 +148,42 @@ Press **⌃⌥A** or choose **Screenshot** from the menu bar's right-click menu.
 - Drag on any display to select a region; each capture stays within its starting display. The screenshot freezes before selection and excludes EasyMacOS windows, existing pinned images, and the pointer.
 - Adjust the selection using its edges/corners or drag inside it with the selection tool. Annotation locks the selection; **Reselect** clears annotations and starts over.
 - Annotate with rectangle, ellipse, arrow, pen, text (including Chinese input), and mosaic. Choose color/width, and use **⌘Z / ⇧⌘Z** to undo/redo. Finish text editing by clicking a tool or output action. Mosaic changes the exported pixels; exported images contain flattened annotations.
+- 选择“马赛克”展开独立属性栏，默认“框选”，拖出矩形即可像素化；切换“涂抹”后可连续拖动或单击点涂，圆形指示圈显示覆盖范围。两种模式均在拖动期间显示真实像素块效果，画笔指示圈不进入输出图片。
+- “颗粒大小”范围为四至四十，默认十二；“画笔大小”仅涂抹模式显示，范围为八至一百六十，默认三十二。数值使用原图逻辑坐标，预览倍率只影响显示比例。两项参数彼此独立，也不改变普通画笔的颜色和粗细；当前窗口切换工具保留设置，调整只作用于后续操作。每次框选或完整涂抹可作为一次操作撤销、重做。
+- 普通截图、长图和贴图二次编辑共用马赛克参数及渲染规则。马赛克取样来自当前操作之前的原图和已有标注，格点固定在整图坐标中，长图预览分段与整图输出保持一致；复制、保存、钉图及文字和条码识别均采用像素化后的内容。实时取样在后台按可见区域生成，关闭或取消时释放任务和缓存。
+- 选择“文字”后展开独立的两行属性栏：字体列表来自本机，字号支持六至五百一十二点及一位小数，可输入、逐级调整或拖动文字控制点设置；文字颜色提供预设色和系统自定颜色，支持加粗及斜体。文字的颜色、字号与画笔的颜色、粗细分别保存，调整时实时更新当前文字。
+- 单击添加文字并输入，或按住鼠标拖动，以拖动区域的高度或半宽度确定初始字号。输入框自动适应多行内容，背景透明；拖动右下角绿色控制点会缩放文字并同步属性栏字号。拖动文字框边缘可移动文字，边框上方中央有移动标记；移动限制在当前选区或图片内，文字内容、字体样式、选中范围及字号保持不变，后续导出采用移动后的原图位置。移离原边缘后会按当前位置重新计算可用空间，可继续扩大文字。
+- 在文字内部显示输入光标，边框显示张开手形，移动拖动期间显示抓取手形，右下角及新建拖动期间显示斜向缩放指针，松开或离开后恢复对应指针。编辑框边线和控制点仅用于交互，不进入复制、保存或贴图。输入时保留原生选择、输入法及文字撤销，切换工具或输出时提交文字标注；关闭时移除光标追踪，迟到鼠标事件不会继续移动文字。
+- 普通截图、长图编辑及贴图二次编辑共用文字属性与输入框，字体大小始终以原图中的点数保存，预览缩放不改变导出字号。没有原生斜体字形的字体采用倾斜渲染，支持中文字体；已经展平到原图的历史文字继续作为图片内容保留。
 - **Copy** (⌘C outside text editing) writes a full-resolution PNG and closes capture. It does not send a paste keystroke. **Save** (⌘S) opens a PNG save dialog with a timestamped filename; canceling returns to editing. **Pin** opens a temporary floating image. **Esc** or a right-click anywhere in the screenshot overlay cancels capture (while entering Chinese text, Escape can first cancel the active composition).
 - 钉图使用无标题栏窗口，不显示顶部系统按钮；双击关闭当前钉图。
 - 鼠标悬停在钉图上即可使用滚轮或触控板上下滚动缩放，无需先点击；以鼠标所在位置为缩放中心并保持图片比例。显示比例最低为原图的百分之十（同时遵循窗口最小尺寸），最高为原图的八倍；右键菜单可恢复原始显示比例，复制和保存保持原图分辨率。
 - 同一钉图保存尚未结束时不重复启动保存；关闭钉图会取消尚在等待的保存面板并释放视图，取消及关闭后的迟到错误不再弹窗。用户已经确认文件目标后，开始的原子写入会完成，关闭钉图不撤销已确认的写入。
 - 拖动钉图可移动位置，拖动边缘可等比缩放，右键可复制、保存、恢复原始比例或关闭。钉图支持多窗口和全屏空间，菜单栏可统一关闭全部钉图。原图使用私有临时文件保存，所有钉图共用三十二兆字节的显示缓存，复制和保存保留原始分辨率，压缩编码按需执行。关闭后清理临时原图，退出后不恢复钉图。
+- 右键“旋转”提供顺时针、逆时针九十度及一百八十度；“镜像”提供水平和垂直方向。变换使用原始像素并保留透明度，九十度旋转交换宽高，保持当前显示倍率并围绕窗口中心调整。
+- 右键“贴图裁剪…”打开独立预览，拖动框选，选区内拖动可移动，拖拽八个边角可调整，“重新框选”恢复整图。点击“应用裁剪”或按回车确认，以原始像素边界裁剪并在原位置保留选中内容；取消、退出键或右键关闭裁剪窗口时保留原图。
+- 右键“二次编辑…”打开现有标注工具，支持矩形、椭圆、箭头、画笔、文字、马赛克、颜色、粗细及撤销重做。绿色确认按钮或非文字输入状态下按回车，将标注展平并替换同一贴图；取消保留原图。原贴图中的既有标注已经展平，可在其上添加新标注。
+- 编辑窗口内也可复制或保存当前标注；成功后应用到原贴图，复制失败、保存失败或取消保存会保留编辑内容并允许重试。单张贴图同一时间只保留一个裁剪或编辑会话，修改期间暂时禁用原贴图的复制、保存和识别，避免输出旧内容；已有识别结果在开始修改时关闭。关闭所属贴图或全部贴图时，取消未完成任务并释放对应编辑窗口。
+- 修改会重置显示位图并同步更新窗口比例，后续缩放、恢复原始显示比例、复制、保存与识别都使用最新原图。仅应用修改不写入剪贴板或历史。
+
+```sh
+./scripts/test.sh --filter 'PinnedScreenshotEditingTests|PinnedScreenshotSaveTests|ScreenshotCoordinatorTests'
+./scripts/test.sh --filter ScreenshotTextEditingTests
+# 合成工具栏窗口内验证按钮中心、边缘、四角及禁用状态，不投递全局鼠标事件。
+./scripts/test.sh --filter ScreenshotToolbarInteractionTests
+./scripts/test.sh --filter 'ScreenshotMosaicTests|ScreenshotMosaicEditingTests'
+# 可选：将马赛克两种模式的中英文、深浅色合成预览保存在本机。
+EASYMACOS_MOSAIC_RENDER_DIR="$PWD/test-results/mosaic" ./scripts/test.sh --filter ScreenshotMosaicEditingTests
+# 可选：将中英文、深浅色及不同窗口尺寸的合成编辑预览保存在本机。
+EASYMACOS_PIN_EDITOR_RENDER_DIR="$PWD/test-results/pinned-editor" ./scripts/test.sh --filter PinnedScreenshotEditingTests
+EASYMACOS_TEXT_EDITOR_RENDER_DIR="$PWD/test-results/text-editor" ./scripts/test.sh --filter ScreenshotTextEditingTests
+```
 
 Only copying a screenshot or pinned image can add it to history. Recording must be enabled, onboarding complete, and clipboard access allowed; the application exclusion list also applies. Source application is a best-effort observation of the foreground app at capture start. Saving or pinning alone does not add history. A successful copy stays on the clipboard even if history storage fails; a separate notice reports that failure. The existing **20 MiB / 40 million pixel** history image limits do not change screenshot export quality. Larger images can be copied/saved/pinned but are skipped by history with a notice.
 
 Screen capture has a separate working-memory guard (100 million pixels across captured displays and per exported bitmap). Capture buffers and annotation previews are released when a session ends; preview/export rendering is serialized off the main actor. Protected content may be blank according to macOS rules. Display-configuration changes cancel an active session; start another capture after the displays settle.
 
-跨显示器选区、横向拼接、窗口吸附、编辑已展平钉图及退出后恢复钉图暂不支持。
+跨显示器选区、横向拼接、窗口吸附、单独修改已经展平的历史标注及退出后恢复钉图暂不支持。
 
 ## 截图文字识别
 
@@ -186,10 +211,18 @@ PASTEMAN_RENDER_TESTS=1 ./scripts/test.sh --filter RenderingTests
 
 识别使用框选区域或完整长图、钉图的原始像素，并应用已提交标注。长图分段最高四千零九十六像素，窄图按宽度缩短分段，相邻分段保留一半重叠以覆盖常见跨边界码图。只合并同一位置、相同原始内容的重复检测，保留不同位置的相同码；不会像文字排版一样合并空白字符。关闭结果、取消截图或关闭钉图会取消系统请求并丢弃迟到结果。
 
+文字和条码识别通过同一应用可执行文件的内部辅助入口运行，在创建应用界面和其他模块前处理单个请求；不经启动服务打开第二个应用实例。辅助进程按请求启动，完成后退出，以释放系统识别模型缓存。两个识别入口共用串行调度，父进程为在途识别保留图片预算，取消时终止辅助进程并等待退出，取消的排队请求不会启动。完成、失败和取消均清理私有请求文件，贴图原图由其原有所有者继续管理。
+
+普通截图和长图的识别输入按最多二百五十六行、约八兆字节的条带写出，单行本身超过预算时仍保留完整行；不为传递而提前展平整张长图，标注继续在辅助进程按原有分段渲染。贴图直接复用已有原图文件。分段进度跨进程保留完整序列，识别结束前排空最后的进度，避免快速完成时遗漏通知。
+
 以下检查使用本机生成的合成码图与模拟服务，不采集真实屏幕或访问真实剪贴板：
 
 ```sh
 ./scripts/test.sh --filter 'ScreenshotBarcode|ScreenshotText|ScreenshotIntegrationTests|LongScreenshotOutputTests'
+# 验证识别取消、排队、逐行像素传递及失败清理。
+./scripts/test.sh --filter ScreenshotRecognitionProcessTests
+# 完成应用构建后，以实际签名产物验证辅助进程入口。
+EASYMACOS_RECOGNITION_EXECUTABLE="$PWD/dist/EasyMacOS.app/Contents/MacOS/EasyMacOS" ./scripts/test.sh -c release --filter ScreenshotRecognitionProcessTests/helperRendersTextAnnotationsAndExitsAfterReturningResult
 ```
 
 ## 自动滚动长截屏

@@ -1,6 +1,6 @@
 import AppKit
 
-enum ScreenshotRecognitionKind: Sendable, CaseIterable {
+enum ScreenshotRecognitionKind: String, Sendable, CaseIterable, Codable {
     case text, barcodes
 
     var title: String {

@@ -2,6 +2,18 @@ import AppKit
 import SwiftUI
 import PasteManCore
 
+protocol ScreenshotAnnotationDocument: Sendable {
+    var image: CGImage { get }
+    var pointSize: CGSize { get }
+}
+
+extension LongScreenshotDocument: ScreenshotAnnotationDocument {}
+
+struct PinnedScreenshotDocument: ScreenshotAnnotationDocument {
+    let image: CGImage
+    let pointSize: CGSize
+}
+
 @MainActor final class LongScreenshotEditor: NSObject, NSWindowDelegate {
     typealias ZoomMode = ScreenshotPreviewMode
     let document: LongScreenshotDocument
@@ -150,7 +162,10 @@ import PasteManCore
         guard !state.busy else { return }
         canvas.commitText()
         switch action {
-        case .tool(let tool): if tool != .select { state.tool = tool }
+        case .tool(let tool):
+            if tool != .select { state.tool = tool }
+            if tool == .text { state.optionsExpanded = true; state.shapesExpanded = false; layout() }
+            if window.isVisible { window.invalidateCursorRects(for: canvas) }
         case .preview(let mode): setZoom(mode)
         case .undo: state.history.undo(); refresh()
         case .redo: state.history.redo(); refresh()
@@ -190,143 +205,215 @@ private struct LongScreenshotEditorHeader: View {
 }
 
 @MainActor final class LongScreenshotCanvas: NSView {
-    let document: LongScreenshotDocument
-    weak var state: ScreenshotEditorState?
+    let document: any ScreenshotAnnotationDocument
+    weak var state: ScreenshotEditorState? {
+        didSet {
+            oldValue?.textAttributesChanged = nil
+            oldValue?.mosaicAttributesChanged = nil
+            state?.textAttributesChanged = { [weak self] in self?.updateTextAttributes() }
+            state?.mosaicAttributesChanged = { [weak self] in self?.needsDisplay = true }
+        }
+    }
     var onAction: ((ScreenshotEditorAction) -> Void)?
     var onHistoryChanged: (() -> Void)?
     var zoom: CGFloat = 1 {
-        didSet { if abs(oldValue - zoom) > 0.001 { invalidateTiles() } }
+        didSet { if abs(oldValue - zoom) > 0.001 { commitText(); invalidateTiles() } }
     }
     private var tiles: [Int: CGImage] = [:]
+    private var tileVersions: [Int: Int] = [:]
     private var tileTask: Task<Void, Never>?
     private var revision = 0
     private var transient: ScreenshotAnnotation?
-    private var textEditor: NSTextView?
+    let mosaicPreview = ScreenshotMosaicPreview()
+    private var pointerTracking: NSTrackingArea?
+    private var mosaicPointer: CGPoint?
+    var mosaicCursorRect: CGRect? {
+        guard let state, state.tool == .mosaic, state.mosaicOptions.mode == .brush,
+            !state.busy, let point = mosaicPointer else { return nil }
+        return ScreenshotMosaicCursor.rect(at: point, diameter: state.mosaicOptions.resolvedBrushSize, zoom: zoom)
+    }
+    private var textEditor: ScreenshotTextView?
     private var textPosition = CGPoint.zero
-    private var textStyle: (AnnotationColor, CGFloat)?
+    private var textCreationAnchor: CGPoint?
     static let tileHeight = 1024
-    init(document: LongScreenshotDocument) {
+    init(document: any ScreenshotAnnotationDocument) {
         self.document = document
         super.init(frame: CGRect(origin: .zero, size: document.pointSize))
+        mosaicPreview.onChange = { [weak self] in self?.needsDisplay = true }
+        mosaicPreview.onError = { [weak self] error in
+            self?.state?.error = error.localizedDescription; self?.state?.layoutChanged?()
+        }
         setAccessibilityLabel(L.t("Scrolling screenshot annotation canvas", "长截屏标注画布"))
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
-    override func resetCursorRects() { addCursorRect(bounds, cursor: .crosshair) }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: state?.tool == .text ? .iBeam : .crosshair) }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let pointerTracking { removeTrackingArea(pointerTracking) }
+        let area = NSTrackingArea(rect: .zero,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect, .enabledDuringMouseDrag], owner: self, userInfo: nil)
+        pointerTracking = area; addTrackingArea(area)
+    }
+    override func mouseEntered(with event: NSEvent) { updateMosaicPointer(event) }
+    override func mouseMoved(with event: NSEvent) { updateMosaicPointer(event) }
+    override func mouseExited(with event: NSEvent) {
+        let previous = mosaicCursorRect
+        mosaicPointer = nil
+        if let previous { setNeedsDisplay(previous.insetBy(dx: -3, dy: -3)) }
+    }
+    private func updateMosaicPointer(_ event: NSEvent) {
+        let previous = mosaicCursorRect
+        let point = convert(event.locationInWindow, from: nil)
+        mosaicPointer = visibleRect.contains(point) && bounds.contains(point) ? logicalPoint(point) : nil
+        if let previous { setNeedsDisplay(previous.insetBy(dx: -3, dy: -3)) }
+        if let next = mosaicCursorRect { setNeedsDisplay(next.insetBy(dx: -3, dy: -3)) }
+    }
     func logicalPoint(_ viewPoint: CGPoint) -> CGPoint {
         CGPoint(x: min(document.pointSize.width, max(0, viewPoint.x / zoom)),
             y: min(document.pointSize.height, max(0, viewPoint.y / zoom)))
     }
-    private var scale: CGFloat { CGFloat(document.image.width) / document.pointSize.width }
+    private var verticalScale: CGFloat { CGFloat(document.image.height) / document.pointSize.height }
     private func tileRect(_ index: Int) -> CGRect {
         CGRect(x: 0, y: index * Self.tileHeight, width: document.image.width,
             height: min(Self.tileHeight, document.image.height - index * Self.tileHeight))
     }
     func invalidateTiles() {
-        revision += 1; tileTask?.cancel(); tileTask = nil; tiles.removeAll()
+        revision += 1; tileTask?.cancel(); tileTask = nil
+        mosaicPreview.reconcile(history: state?.history.annotations ?? [])
         needsDisplay = true; requestVisibleTiles()
     }
     func requestVisibleTiles() {
         guard window != nil, zoom > 0 else { return }
         let visible = visibleRect
-        let start = max(0, Int(visible.minY / zoom * scale) / Self.tileHeight)
-        let end = min((document.image.height - 1) / Self.tileHeight, Int(visible.maxY / zoom * scale) / Self.tileHeight)
+        let start = max(0, Int(visible.minY / zoom * verticalScale) / Self.tileHeight)
+        let end = min((document.image.height - 1) / Self.tileHeight, Int(visible.maxY / zoom * verticalScale) / Self.tileHeight)
         guard start <= end else { return }
         let indices = Array(start...end)
         tiles = tiles.filter { indices.contains($0.key) }
+        tileVersions = tileVersions.filter { indices.contains($0.key) }
+        requestMosaicPreview()
         tileTask?.cancel()
         let version = revision
         let annotations = state?.history.annotations ?? []
         let maximumWidth = min(document.image.width, max(1, Int(document.pointSize.width * zoom * (window?.backingScaleFactor ?? 2))))
         tileTask = Task { [weak self, document] in
             guard let self else { return }
-            for index in indices where self.tiles[index] == nil {
+            for index in indices where self.tileVersions[index] != version {
                 do {
                     let image = try await LongScreenshotTileWorker.shared.render(document: document, rect: self.tileRect(index),
                         annotations: annotations, maximumWidth: maximumWidth)
                     guard !Task.isCancelled, self.revision == version else { return }
                     self.tiles[index] = image
-                    self.setNeedsDisplay(CGRect(x: 0, y: CGFloat(index * Self.tileHeight) / self.scale * self.zoom,
-                        width: self.bounds.width, height: CGFloat(image.height) / CGFloat(image.width) * self.bounds.width))
+                    self.tileVersions[index] = version
+                    self.setNeedsDisplay(CGRect(x: 0, y: CGFloat(index * Self.tileHeight) / self.verticalScale * self.zoom,
+                        width: self.bounds.width, height: self.tileRect(index).height / self.verticalScale * self.zoom))
                 } catch {
                     guard !Task.isCancelled, self.revision == version else { return }
                     self.state?.error = error.localizedDescription
                     self.state?.layoutChanged?()
                 }
             }
+            guard !Task.isCancelled, self.revision == version else { return }
+            if indices.allSatisfy({ self.tileVersions[$0] == version }) { self.mosaicPreview.acknowledge(annotations) }
+            self.needsDisplay = true
         }
     }
+    func waitForTiles() async { await tileTask?.value }
     override func draw(_ dirtyRect: NSRect) {
         guard let context = NSGraphicsContext.current?.cgContext else { return }
         NSColor.textBackgroundColor.setFill(); dirtyRect.fill()
         for (index, image) in tiles {
             let rect = tileRect(index)
-            let target = CGRect(x: 0, y: rect.minY / scale * zoom, width: document.pointSize.width * zoom,
-                height: rect.height / scale * zoom)
+            let target = CGRect(x: 0, y: rect.minY / verticalScale * zoom, width: document.pointSize.width * zoom,
+                height: rect.height / verticalScale * zoom)
             if target.intersects(dirtyRect) { ScreenshotRenderer.drawImage(image, in: target, context: context) }
         }
-        if let transient {
-            context.saveGState(); context.scaleBy(x: zoom, y: zoom)
-            if transient.tool == .mosaic {
-                context.setFillColor(NSColor.gray.withAlphaComponent(0.65).cgColor); context.fill(transient.rect)
-            } else { ScreenshotRenderer.draw(transient, in: context) }
-            context.restoreGState()
+        context.saveGState()
+        context.clip(to: bounds)
+        context.scaleBy(x: zoom, y: zoom)
+        mosaicPreview.draw(in: context)
+        if let transient, transient.tool != .mosaic { ScreenshotRenderer.draw(transient, in: context) }
+        context.restoreGState()
+        if let rect = mosaicCursorRect {
+            context.saveGState(); context.clip(to: bounds)
+            ScreenshotMosaicCursor.draw(rect, in: context); context.restoreGState()
         }
     }
     override func mouseDown(with event: NSEvent) {
         guard let state, !state.busy else { return }
         commitText(); window?.makeFirstResponder(self)
+        updateMosaicPointer(event)
         let point = logicalPoint(convert(event.locationInWindow, from: nil))
-        if state.tool == .text { beginText(point); return }
+        if state.tool == .text { beginText(point); textCreationAnchor = point; return }
         guard state.tool != .select else { return }
-        transient = ScreenshotAnnotation(tool: state.tool, points: [point],
-            color: AnnotationColor.palette[state.colorIndex], width: state.width)
+        let annotation = state.annotation(at: point)
+        transient = annotation
+        mosaicPreview.begin(annotation, preceding: state.history.annotations)
+        requestMosaicPreview(); needsDisplay = true
     }
     override func mouseDragged(with event: NSEvent) {
-        guard state?.busy == false, var value = transient, let first = value.points.first else { return }
+        guard state?.busy == false else { return }
         autoscroll(with: event)
+        updateMosaicPointer(event)
         let point = logicalPoint(convert(event.locationInWindow, from: nil))
-        if value.tool == .pen {
-            if let last = value.points.last, hypot(last.x - point.x, last.y - point.y) >= 0.75 { value.points.append(point) }
-        } else { value.points = [first, point] }
+        if let anchor = textCreationAnchor {
+            textEditor?.resizeForCreation(delta: CGPoint(x: point.x - anchor.x, y: point.y - anchor.y))
+            return
+        }
+        guard var value = transient else { return }
+        value.extend(to: point)
+        mosaicPreview.update(value)
         transient = value; needsDisplay = true
+        requestMosaicPreview()
     }
     override func mouseUp(with event: NSEvent) {
+        if textCreationAnchor != nil {
+            mouseDragged(with: event); textCreationAnchor = nil
+            textEditor?.finishCreationSizing()
+            return
+        }
         guard state?.busy == false, transient != nil else { return }
         mouseDragged(with: event)
-        if let transient, transient.tool == .pen || transient.rect.width > 0 || transient.rect.height > 0 {
+        if let transient, transient.canCommit {
             state?.history.append(transient)
         }
+        mosaicPreview.end(commit: transient?.canCommit == true)
         transient = nil; onHistoryChanged?()
+    }
+    private func requestMosaicPreview() {
+        guard zoom > 0 else { return }
+        let visible = visibleRect
+        mosaicPreview.request(base: document.image, pointSize: document.pointSize,
+            visibleRegion: CGRect(x: visible.minX / zoom, y: visible.minY / zoom,
+                width: visible.width / zoom, height: visible.height / zoom))
     }
     private func beginText(_ point: CGPoint) {
         guard let state else { return }
-        textPosition = point; textStyle = (AnnotationColor.palette[state.colorIndex], state.width)
-        let editor = NSTextView(frame: CGRect(x: point.x * zoom, y: point.y * zoom,
-            width: max(1, min(320, (document.pointSize.width - point.x) * zoom)), height: max(24, 100 * zoom)))
-        editor.font = .systemFont(ofSize: max(16, state.width * 6) * zoom)
-        editor.textColor = NSColor(cgColor: AnnotationColor.palette[state.colorIndex].cgColor)
-        editor.backgroundColor = .textBackgroundColor
-        editor.isRichText = false; editor.textContainerInset = .zero
-        editor.isAutomaticQuoteSubstitutionEnabled = false; editor.isAutomaticDashSubstitutionEnabled = false
-        editor.textContainer?.lineFragmentPadding = 0
-        editor.textContainer?.widthTracksTextView = false
-        editor.textContainer?.containerSize = CGSize(width: 100_000, height: 100_000)
+        textPosition = point
+        let editor = ScreenshotTextView(origin: CGPoint(x: point.x * zoom, y: point.y * zoom),
+            maximumSize: CGSize(width: (document.pointSize.width - point.x) * zoom, height: (document.pointSize.height - point.y) * zoom),
+            style: state.textStyle, color: state.textColor, scale: zoom,
+            movementBounds: CGRect(x: 0, y: 0, width: document.pointSize.width * zoom, height: document.pointSize.height * zoom))
+        editor.onFontSizeChanged = { [weak state] in state?.textStyle.fontSize = $0 }
         textEditor = editor; addSubview(editor); window?.makeFirstResponder(editor)
     }
+    private func updateTextAttributes() {
+        guard let state else { return }
+        textEditor?.apply(style: state.textStyle, color: state.textColor)
+    }
     func commitText() {
+        textCreationAnchor = nil
         guard let editor = textEditor else { return }
         editor.unmarkText()
-        let text = editor.string
-        editor.removeFromSuperview(); textEditor = nil
+        let annotation = editor.annotation(at: textPosition)
+        editor.dispose(); textEditor = nil
         window?.makeFirstResponder(self)
-        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let textStyle {
-            state?.history.append(ScreenshotAnnotation(tool: .text, points: [textPosition], color: textStyle.0,
-                width: textStyle.1, text: text))
+        if let annotation {
+            state?.history.append(annotation)
             onHistoryChanged?()
         }
-        textStyle = nil
     }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if textEditor != nil { return super.performKeyEquivalent(with: event) }
@@ -341,26 +428,28 @@ private struct LongScreenshotEditorHeader: View {
     }
     func dispose() {
         revision += 1; tileTask?.cancel(); tileTask = nil
-        tiles.removeAll(); transient = nil
-        textEditor?.removeFromSuperview(); textEditor = nil
+        tiles.removeAll(); tileVersions.removeAll(); transient = nil
+        mosaicPreview.dispose(); mosaicPointer = nil
+        textEditor?.dispose(); textEditor = nil; textCreationAnchor = nil
         state = nil; onAction = nil; onHistoryChanged = nil
     }
 }
 
 actor LongScreenshotTileWorker {
     static let shared = LongScreenshotTileWorker()
-    func render(document: LongScreenshotDocument, rect: CGRect, annotations: [ScreenshotAnnotation], maximumWidth: Int) async throws -> CGImage {
+    func render(document: any ScreenshotAnnotationDocument, rect: CGRect, annotations: [ScreenshotAnnotation], maximumWidth: Int) async throws -> CGImage {
         let mosaicCost = annotations.contains { $0.tool == .mosaic } ? ScreenshotRenderer.mosaicCacheLimit : 0
         return try await ImageWorkBudget.shared.withPermit(estimatedBytes: Int(rect.width * rect.height) * 12 + mosaicCost, priority: .display) {
             try await self.renderAdmitted(document: document, rect: rect, annotations: annotations, maximumWidth: maximumWidth)
         }
     }
-    private func renderAdmitted(document: LongScreenshotDocument, rect: CGRect, annotations: [ScreenshotAnnotation], maximumWidth: Int) throws -> CGImage {
+    private func renderAdmitted(document: any ScreenshotAnnotationDocument, rect: CGRect, annotations: [ScreenshotAnnotation], maximumWidth: Int) throws -> CGImage {
         try Task.checkCancellation()
-        let scale = CGFloat(document.image.width) / document.pointSize.width
+        let scaleX = CGFloat(document.image.width) / document.pointSize.width
+        let scaleY = CGFloat(document.image.height) / document.pointSize.height
         let dimension = Int(max(rect.width, rect.height) * min(1, CGFloat(maximumWidth) / rect.width))
         return try ScreenshotRenderer.render(base: document.image, pointSize: document.pointSize,
             annotations: annotations, maximumDimension: max(1, dimension),
-            region: CGRect(x: rect.minX / scale, y: rect.minY / scale, width: rect.width / scale, height: rect.height / scale))
+            region: CGRect(x: rect.minX / scaleX, y: rect.minY / scaleY, width: rect.width / scaleX, height: rect.height / scaleY))
     }
 }

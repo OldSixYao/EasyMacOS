@@ -144,6 +144,7 @@ struct CapturedScreen: Sendable {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, event.keyCode == 53 else { return event }
             if let text = NSApp.keyWindow?.firstResponder as? NSTextView, text.hasMarkedText() { return event }
+            if NSApp.keyWindow is NSColorPanel { return event }
             if self.textSession != nil { return event }
             // Saving uses a system sheet; let Escape dismiss that sheet first.
             if self.saving { return event }

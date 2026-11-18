@@ -49,6 +49,43 @@ final class PinnedImageStorage: Sendable {
         completed = true
     }
 
+    /// 识别输入按条带写出，避免为转交辅助进程再分配一张完整长图。
+    init(recognitionImage image: CGImage, pointSize: CGSize) throws {
+        guard pointSize.width.isFinite, pointSize.height.isFinite, pointSize.width > 0, pointSize.height > 0,
+            image.width > 0, image.height > 0, image.width <= 100_000_000 / image.height
+        else { throw ScreenshotImageError.allocationFailed }
+        self.pointSize = pointSize
+        rawSize = CGSize(width: image.width, height: image.height)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("EasyMacOS-Pin-" + UUID().uuidString)
+        self.directory = directory
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        var completed = false
+        defer { if !completed { try? FileManager.default.removeItem(at: directory) } }
+        let url = directory.appendingPathComponent("pixels.rgba")
+        guard FileManager.default.createFile(atPath: url.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        else { throw CocoaError(.fileWriteUnknown) }
+        let file = try FileHandle(forWritingTo: url)
+        defer { try? file.close() }
+        let rows = max(1, min(256, 8 * 1_048_576 / (image.width * 4)))
+        for row in stride(from: 0, to: image.height, by: rows) {
+            try Task.checkCancellation()
+            try autoreleasepool {
+                let height = min(rows, image.height - row)
+                guard let crop = image.cropping(to: CGRect(x: 0, y: row, width: image.width, height: height)),
+                    let context = CGContext(data: nil, width: image.width, height: height, bitsPerComponent: 8,
+                        bytesPerRow: image.width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue), let bytes = context.data
+                else { throw ScreenshotImageError.allocationFailed }
+                context.draw(crop, in: CGRect(x: 0, y: 0, width: image.width, height: height))
+                try file.write(contentsOf: Data(bytesNoCopy: bytes, count: context.bytesPerRow * height, deallocator: .none))
+            }
+        }
+        try Task.checkCancellation()
+        stored = Task { url }
+        completed = true
+    }
+
     deinit {
         let directory = directory
         let stored = stored
@@ -62,6 +99,17 @@ final class PinnedImageStorage: Sendable {
         defer { withExtendedLifetime(self) {} }
         let url = try await stored.value
         return try await PinnedImageWorker.shared.load(url: url, rawSize: rawSize)
+    }
+    func recognitionFile() async throws -> (url: URL, rawSize: CGSize?, pixelSize: CGSize) {
+        let url = try await stored.value
+        if let rawSize { return (url, rawSize, rawSize) }
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+            let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+            let width = properties[kCGImagePropertyPixelWidth] as? Int,
+            let height = properties[kCGImagePropertyPixelHeight] as? Int,
+            width > 0, height > 0, width <= 100_000_000 / height
+        else { throw ScreenshotImageError.allocationFailed }
+        return (url, nil, CGSize(width: width, height: height))
     }
     func png() async throws -> Data {
         defer { withExtendedLifetime(self) {} }
@@ -77,6 +125,15 @@ final class PinnedImageStorage: Sendable {
 
 actor PinnedImageWorker {
     static let shared = PinnedImageWorker()
+    func archiveForRecognition(base: CGImage, pointSize: CGSize) async throws -> PinnedImageStorage {
+        let cost = max(base.width * 4, min(base.bytesPerRow * base.height, 8 * 1_048_576))
+        return try await ImageWorkBudget.shared.withPermit(estimatedBytes: cost, priority: .userInitiated) {
+            try await self.archiveRecognitionAdmitted(base: base, pointSize: pointSize)
+        }
+    }
+    private func archiveRecognitionAdmitted(base: CGImage, pointSize: CGSize) throws -> PinnedImageStorage {
+        try PinnedImageStorage(recognitionImage: base, pointSize: pointSize)
+    }
     func archive(base: CGImage, pointSize: CGSize, annotations: [ScreenshotAnnotation]) async throws -> PinnedImageStorage {
         let cost = base.bytesPerRow * base.height * (annotations.isEmpty ? 1 : 2)
         if let result = try ImageWorkBudget.shared.performIfAvailable(estimatedBytes: cost, operation: {

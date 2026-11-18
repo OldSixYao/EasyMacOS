@@ -752,7 +752,7 @@ private func longBytes(_ image: CGImage) -> Data { image.dataProvider!.data! as 
         let point = CGPoint(x: 31, y: 310)
         editor.canvas.zoom = 0.4
         #expect(editor.canvas.logicalPoint(CGPoint(x: point.x * 0.4, y: point.y * 0.4)) == point)
-        editor.canvas.zoom = 1
+        editor.setZoom(.actual)
         editor.state.action?(.tool(.text))
         let location = editor.canvas.convert(point, to: nil)
         let event = try #require(NSEvent.mouseEvent(with: .leftMouseDown, location: location, modifierFlags: [], timestamp: 0,
@@ -789,11 +789,11 @@ private func longBytes(_ image: CGImage) -> Data { image.dataProvider!.data! as 
         #expect(editor.canvas.frame.size == editor.document.pointSize)
         #expect(editor.canvas.frame.origin == .zero)
         editor.setZoom(.fill); try expectFilled()
+        editor.state.action?(.tool(.text))
         let logical = CGPoint(x: 41, y: 121)
         let location = editor.canvas.convert(CGPoint(x: logical.x * editor.zoom, y: logical.y * editor.zoom), to: nil)
         let event = try #require(NSEvent.mouseEvent(with: .leftMouseDown, location: location, modifierFlags: [],
             timestamp: 0, windowNumber: editor.window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
-        editor.state.action?(.tool(.text))
         editor.canvas.mouseDown(with: event)
         let text = try #require(editor.canvas.subviews.compactMap { $0 as? NSTextView }.first)
         text.string = "铺满后坐标仍正确"
